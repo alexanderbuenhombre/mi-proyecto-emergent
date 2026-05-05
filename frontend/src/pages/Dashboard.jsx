@@ -16,6 +16,7 @@ import SignalHistory from "../components/dashboard/SignalHistory";
 import NextCandleBinary from "../components/dashboard/NextCandleBinary";
 import SystemStats from "../components/dashboard/SystemStats";
 import SourceSelector from "../components/dashboard/SourceSelector";
+import ConfluencePanel from "../components/dashboard/ConfluencePanel";
 import VoiceSettings from "../components/dashboard/VoiceSettings";
 import RecommendationBanner from "../components/dashboard/RecommendationBanner";
 
@@ -35,6 +36,7 @@ export default function Dashboard() {
 
   const tfAnalysis = multi.data?.timeframes?.[tf];
   const recommendation = activeSig.data?.recommendation;
+  const confluence = activeSig.data?.confluence;
 
   useVoiceAlerts({
     signal: activeSig.data?.signal,
@@ -52,7 +54,8 @@ export default function Dashboard() {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
           {/* LEFT */}
           <div className="lg:col-span-3 flex flex-col gap-4">
-            <BullsBearsGauge analysis={tfAnalysis} />
+            <BullsBearsGauge analysis={tfAnalysis} timeframe={tf} />
+            <ConfluencePanel data={confluence} />
             <SourceSelector value={source} onChange={setSource} />
             <VoiceSettings onChange={setVoiceSettings} />
             <SystemStats data={stats.data} />

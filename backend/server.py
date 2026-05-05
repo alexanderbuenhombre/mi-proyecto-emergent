@@ -277,6 +277,71 @@ def analyze_timeframe_tv(tv: Dict[str, Any], timeframe: str, current_price: floa
     }
 
 
+# ---------------- Confluence + Probability ----------------
+def compute_confluence(tv: Dict[str, Any], price: float, primary_tf: str) -> Dict[str, Any]:
+    """Check if multiple timeframes agree → higher probability signal.
+    Returns aligned timeframes count and combined direction.
+    """
+    # Use 3 TFs around the primary for confluence
+    confluence_map = {
+        "1m":  ["1m", "5m", "15m"],
+        "5m":  ["5m", "15m", "1h"],
+        "15m": ["5m", "15m", "1h"],
+        "30m": ["15m", "30m", "1h"],
+        "1h":  ["15m", "1h", "4h"],
+        "4h":  ["1h", "4h", "1d"],
+        "1d":  ["4h", "1d"],
+    }
+    tfs = confluence_map.get(primary_tf, ["5m", "15m", "1h"])
+    analyses = [analyze_timeframe_tv(tv, t, price) for t in tfs]
+    buy = sum(1 for a in analyses if a["direction"] == "BUY")
+    sell = sum(1 for a in analyses if a["direction"] == "SELL")
+    aligned = max(buy, sell)
+    direction = "BUY" if buy > sell else ("SELL" if sell > buy else "NEUTRAL")
+    avg_score = sum(abs(a["score"]) for a in analyses) / max(len(analyses), 1)
+
+    return {
+        "timeframes": tfs,
+        "aligned_count": aligned,
+        "total_count": len(tfs),
+        "direction": direction,
+        "avg_strength": round(avg_score, 1),
+        "details": [{"tf": t, "dir": a["direction"], "score": a["score"]} for t, a in zip(tfs, analyses)],
+    }
+
+
+def compute_probability(analysis: Dict[str, Any], confluence: Dict[str, Any], session_label: str) -> Dict[str, Any]:
+    """Combine score, confluence, and session liquidity into probability rating.
+    Returns: {label: ULTRA|ALTA|MEDIA|BAJA, percent: 0-99, take: bool, reason: str}
+    """
+    base_score = abs(analysis["score"])
+    confl_pct = confluence["aligned_count"] / max(confluence["total_count"], 1)  # 0..1
+    confl_match = confluence["direction"] == analysis["direction"]
+
+    # Session bonus (London/NY = +5, Asia overlap = 0)
+    session_bonus = 5 if any(s in session_label for s in ["LONDRES", "NUEVA YORK"]) else 0
+
+    # Probability % heuristic
+    prob = base_score * 0.6 + (confl_pct * 100 if confl_match else 0) * 0.3 + session_bonus
+    prob = max(0, min(99, int(prob)))
+
+    if prob >= 80 and confluence["aligned_count"] >= 3:
+        label, take, reason = "ULTRA", True, f"Confluencia perfecta ({confluence['aligned_count']}/{confluence['total_count']} TFs) + score {base_score}. Probabilidad muy alta."
+    elif prob >= 65 and confluence["aligned_count"] >= 2:
+        label, take, reason = "ALTA", True, f"{confluence['aligned_count']}/{confluence['total_count']} TFs alineados con dirección {analysis['direction']}. Recomendable tomar."
+    elif prob >= 50:
+        label, take, reason = "MEDIA", False, f"Solo {confluence['aligned_count']}/{confluence['total_count']} TFs alineados. Riesgo moderado — espera mejor confirmación."
+    else:
+        label, take, reason = "BAJA", False, f"Indicadores débiles o contradictorios. NO recomendable operar ahora."
+
+    return {
+        "label": label,
+        "percent": prob,
+        "take": take,
+        "reason": reason,
+    }
+
+
 # ---------------- Recommendation engine ----------------
 def detect_sudden_move(direction_against: Literal["BUY", "SELL"], atr_value: float) -> Dict[str, Any]:
     """Look at last ~30s of ticks: if move against signal > 1.0×ATR_minute, flag reversal."""
@@ -298,9 +363,12 @@ def detect_sudden_move(direction_against: Literal["BUY", "SELL"], atr_value: flo
     return {"reversal": False, "delta": round(delta, 2), "threshold": round(threshold, 2)}
 
 
-def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analysis: Dict[str, Any]) -> Dict[str, Any]:
-    """Return action, label, color, message, urgency."""
+def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analysis: Dict[str, Any],
+                            probability: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Return action, label, color, message, urgency, and 'take' recommendation."""
     if not signal:
+        # No active signal — but still tell user if market conditions are good for waiting an entry
+        prob_label = probability["label"] if probability else "BAJA"
         return {
             "action": "ESPERAR",
             "label": "ESPERAR",
@@ -308,6 +376,10 @@ def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analy
             "message": "Esperando confirmación de tendencia. No operes ahora.",
             "urgency": "low",
             "tone": "neutral",
+            "take": False,
+            "take_label": "NO TOMAR",
+            "take_reason": probability["reason"] if probability else "Sin señal generada.",
+            "probability": prob_label,
         }
 
     entry = signal["entry"]
@@ -321,78 +393,100 @@ def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analy
     now = datetime.now(timezone.utc)
     minutes_left = max(0, int((expires_at - now).total_seconds() / 60))
 
+    take_flag = bool(probability and probability.get("take"))
+    take_label = "RECOMENDABLE" if take_flag else "NO RECOMENDABLE"
+    take_reason = probability["reason"] if probability else ""
+    prob_label = probability["label"] if probability else "MEDIA"
+
+    common = {"take": take_flag, "take_label": take_label, "take_reason": take_reason, "probability": prob_label}
+
     # Stop Loss hit?
     if (isBuy and price <= sl) or (not isBuy and price >= sl):
-        return {
+        return {**common,
             "action": "STOP_LOSS_HIT",
             "label": "STOP LOSS",
             "headline": "Stop Loss alcanzado · Cierra ahora",
             "message": f"Precio {price:.2f} tocó SL {sl:.2f}. Cierra inmediatamente para limitar pérdida.",
             "urgency": "high",
             "tone": "danger",
+            "take": False, "take_label": "CERRAR AHORA",
         }
 
     # TP3 reached? (full take profit)
     if (isBuy and price >= tp3) or (not isBuy and price <= tp3):
-        return {
+        return {**common,
             "action": "TOMAR_GANANCIAS",
             "label": "TP3 ALCANZADO",
             "headline": "Objetivo final alcanzado · Cierra todo",
             "message": f"Precio {price:.2f} alcanzó TP3 {tp3:.2f}. Cierra posición completa.",
             "urgency": "high",
             "tone": "success",
+            "take": True, "take_label": "CERRAR Y TOMAR GANANCIA",
         }
 
     # TP2 reached?
     if (isBuy and price >= tp2) or (not isBuy and price <= tp2):
-        return {
+        return {**common,
             "action": "TOMAR_GANANCIAS",
             "label": "TP2 ALCANZADO",
             "headline": "Toma parcial · Mueve SL a TP1",
             "message": f"Precio {price:.2f} alcanzó TP2 {tp2:.2f}. Cierra 60% y mueve stop a TP1.",
             "urgency": "medium",
             "tone": "success",
+            "take": True, "take_label": "TOMAR PARCIAL",
         }
 
     # TP1 reached?
     if (isBuy and price >= tp1) or (not isBuy and price <= tp1):
-        return {
+        return {**common,
             "action": "TOMAR_GANANCIAS",
             "label": "TP1 ALCANZADO",
             "headline": "Toma parcial · Mueve SL a entrada",
             "message": f"Precio {price:.2f} alcanzó TP1 {tp1:.2f}. Cierra 30-50% y protege entrada.",
             "urgency": "medium",
             "tone": "success",
+            "take": True, "take_label": "TOMAR PARCIAL",
         }
 
     # Sudden reversal against signal?
     move = detect_sudden_move("BUY" if isBuy else "SELL", analysis.get("atr", 1.0))
     if move["reversal"]:
-        return {
+        return {**common,
             "action": "CERRAR_REVERSO",
             "label": "REVERSO BRUSCO",
             "headline": "Movimiento adverso fuerte · Considera cerrar",
             "message": f"Precio se movió {move['delta']:+.2f} en últimos 45s contra tu posición. Evalúa cierre.",
             "urgency": "high",
             "tone": "danger",
+            "take": False, "take_label": "CERRAR POSICIÓN",
         }
 
-    # If signal is fresh and price near entry → TOMAR
+    # If signal is fresh and price near entry → check probability before saying TOMAR
     near_entry = abs(price - entry) / entry <= 0.0015  # within 0.15%
     if near_entry and signal["confidence"] >= 70:
-        return {
-            "action": "TOMAR",
-            "label": "TOMAR AHORA",
-            "headline": f"Toma señal {direction} · Precio cerca de entrada",
-            "message": f"Precio {price:.2f} cerca de {entry:.2f}. Confianza {signal['confidence']}%. Quedan {minutes_left}min.",
-            "urgency": "high",
-            "tone": "buy" if isBuy else "sell",
-        }
+        if take_flag:
+            return {**common,
+                "action": "TOMAR",
+                "label": "TOMAR AHORA",
+                "headline": f"Toma señal {direction} · Precio cerca de entrada",
+                "message": f"Precio {price:.2f} cerca de {entry:.2f}. Confianza {signal['confidence']}%. Quedan {minutes_left}min. {take_reason}",
+                "urgency": "high",
+                "tone": "buy" if isBuy else "sell",
+            }
+        else:
+            return {**common,
+                "action": "ESPERAR",
+                "label": "NO TOMAR",
+                "headline": f"Señal {direction} disponible · Probabilidad {prob_label}",
+                "message": f"Aunque hay señal, {take_reason} Mejor espera mayor confluencia.",
+                "urgency": "medium",
+                "tone": "neutral",
+            }
 
     # Price drifted from entry
     drift_pct = abs(price - entry) / entry * 100
     if drift_pct > 0.3:
-        return {
+        return {**common,
             "action": "ESPERAR",
             "label": "ESPERAR",
             "headline": "Precio se alejó · Espera retroceso",
@@ -402,7 +496,7 @@ def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analy
         }
 
     # Mid-range hold
-    return {
+    return {**common,
         "action": "MANTENER",
         "label": "MANTENER POSICIÓN",
         "headline": f"Posición {direction} en curso",
@@ -488,9 +582,16 @@ async def api_strength():
     }
 
 
-def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float) -> Optional[Signal]:
+def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float,
+                 confluence: Dict[str, Any], probability: Dict[str, Any]) -> Optional[Signal]:
     direction = analysis["direction"]
     if direction == "NEUTRAL":
+        return None
+    # STRICT: only emit signals when probability is ALTA or ULTRA (high probability filter)
+    if probability["label"] not in ("ALTA", "ULTRA"):
+        return None
+    # Confluence direction must match analysis direction
+    if confluence["direction"] != direction:
         return None
     a = max(analysis["atr"], 0.5)
     # Scale ATR per timeframe - higher TF = larger ATR-based stops
@@ -514,13 +615,14 @@ def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float) -> 
     macd_v = analysis.get("macd", 0)
     label = "alcista fuerte" if direction == "BUY" else "bajista fuerte"
     tf_label = "SCALPING" if timeframe in ("1m", "5m", "15m") else "INTRADÍA" if timeframe in ("30m", "1h") else "SWING"
-    analysis_text = f"Tendencia {label} - MACD {macd_v} ({tf_label})"
+    confl_txt = f"{confluence['aligned_count']}/{confluence['total_count']} TFs"
+    analysis_text = f"Tendencia {label} · {confl_txt} alineados · {tf_label}"
 
     return Signal(
         id=str(uuid.uuid4()),
         direction=direction,
         timeframe=timeframe,
-        confidence=analysis["confidence"],
+        confidence=probability["percent"],
         entry=round(entry, 2),
         tp1=tp1, tp2=tp2, tp3=tp3,
         stop_loss=sl,
@@ -531,6 +633,11 @@ def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float) -> 
     )
 
 
+async def _session_label() -> str:
+    res = await api_sessions()
+    return res.get("label", "ASIA")
+
+
 @api_router.get("/signal/active")
 async def api_active_signal(timeframe: str = Query("5m")):
     if timeframe not in TV_TIMEFRAMES:
@@ -538,30 +645,30 @@ async def api_active_signal(timeframe: str = Query("5m")):
     tv = await fetch_tv_analysis()
     price = await get_price("tradingview")
     analysis = analyze_timeframe_tv(tv, timeframe, price.price)
+    confluence = compute_confluence(tv, price.price, timeframe)
+    sess_label = await _session_label()
+    probability = compute_probability(analysis, confluence, sess_label)
 
     cur = STATE.get("active_signal")
     if cur and cur["timeframe"] == timeframe:
         if datetime.fromisoformat(cur["expires_at"]) > datetime.now(timezone.utc):
             entry = cur["entry"]
-            if cur["direction"] == "BUY":
-                pnl = ((price.price - entry) / entry) * 100
-            else:
-                pnl = ((entry - price.price) / entry) * 100
+            pnl = ((price.price - entry) / entry) * 100 if cur["direction"] == "BUY" else ((entry - price.price) / entry) * 100
             cur["pnl_pct"] = round(pnl, 3)
-            recommendation = compute_recommendation(cur, price.price, analysis)
+            recommendation = compute_recommendation(cur, price.price, analysis, probability)
             return {"signal": cur, "analysis": analysis, "price": price.model_dump(),
-                    "recommendation": recommendation}
+                    "recommendation": recommendation, "confluence": confluence, "probability": probability}
 
-    new_sig = _make_signal(analysis, timeframe, price.price)
+    new_sig = _make_signal(analysis, timeframe, price.price, confluence, probability)
     if new_sig:
         STATE["active_signal"] = new_sig.model_dump()
         STATE["history"].insert(0, STATE["active_signal"])
         STATE["history"] = STATE["history"][:50]
         STATE["stats"]["total"] += 1
     sig_obj = STATE.get("active_signal") if (new_sig and STATE["active_signal"]["id"] == new_sig.id) else None
-    recommendation = compute_recommendation(sig_obj, price.price, analysis)
+    recommendation = compute_recommendation(sig_obj, price.price, analysis, probability)
     return {"signal": sig_obj, "analysis": analysis, "price": price.model_dump(),
-            "recommendation": recommendation}
+            "recommendation": recommendation, "confluence": confluence, "probability": probability}
 
 
 @api_router.get("/recommendation")
@@ -570,17 +677,21 @@ async def api_recommendation(timeframe: str = Query("5m")):
     tv = await fetch_tv_analysis()
     price = await get_price("tradingview")
     analysis = analyze_timeframe_tv(tv, timeframe, price.price)
+    confluence = compute_confluence(tv, price.price, timeframe)
+    sess_label = await _session_label()
+    probability = compute_probability(analysis, confluence, sess_label)
     sig = STATE.get("active_signal")
     if sig and sig["timeframe"] == timeframe:
         if datetime.fromisoformat(sig["expires_at"]) <= datetime.now(timezone.utc):
             sig = None
-    rec = compute_recommendation(sig, price.price, analysis)
-    # Include short stats for UI
+    rec = compute_recommendation(sig, price.price, analysis, probability)
     return {
         "recommendation": rec,
         "price": price.model_dump(),
         "signal_id": sig["id"] if sig else None,
         "signal_direction": sig["direction"] if sig else None,
+        "confluence": confluence,
+        "probability": probability,
     }
 
 

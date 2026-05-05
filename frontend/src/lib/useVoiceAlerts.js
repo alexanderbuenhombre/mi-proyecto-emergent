@@ -54,12 +54,13 @@ export function useVoiceAlerts({ signal, recommendation, settings }) {
         MANTENER: false,
       };
       if (map[action]) {
+        const takeText = recommendation.take ? "Es recomendable tomar la señal." : "No es recomendable tomar la señal.";
         const phrases = {
-          TOMAR: "Tomar señal ahora. " + recommendation.headline,
+          TOMAR: "Tomar señal ahora. " + recommendation.headline + " " + takeText,
           TOMAR_GANANCIAS: recommendation.headline + ". " + recommendation.message,
           STOP_LOSS_HIT: "¡Atención! Stop loss alcanzado. Cierra la posición ahora.",
           CERRAR_REVERSO: "Reverso brusco detectado. Considera cerrar la posición.",
-          ESPERAR: "Esperar. " + recommendation.headline,
+          ESPERAR: "Esperar. " + recommendation.headline + " " + takeText,
         };
         speak(phrases[action] || recommendation.headline, settings);
       }
