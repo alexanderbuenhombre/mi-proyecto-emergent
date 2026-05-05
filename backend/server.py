@@ -1,57 +1,55 @@
 """
 XAUUSD Real-Time Signals Backend
-- Live spot price from TradingView (OANDA) and Gold-API.com (no auth)
-- OHLC candles from Yahoo Finance (XAUUSD=X) for indicators
-- Multi-timeframe signal generation (RSI, MACD, CCI, Bollinger, Volume, Momentum)
-- In-memory signal history
+- Live spot price: TradingView (OANDA) + Gold-API.com cross-check
+- Indicators: TradingView Technical Analysis API (same OANDA spot, multi-TF)
+- In-memory tick ring buffer for sudden-movement detection
+- Dynamic recommendations: TOMAR / ESPERAR / TOMAR_GANANCIAS / CERRAR_REVERSO / STOP_LOSS_HIT
 """
 from fastapi import FastAPI, APIRouter, Query
-from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 import os
 import time
 import asyncio
 import logging
+from collections import deque
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional, Literal, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
 import httpx
-import numpy as np
-import pandas as pd
-import yfinance as yf
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 app = FastAPI(title="XAUUSD Signals API")
 api_router = APIRouter(prefix="/api")
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ---------------- In-memory state ----------------
 STATE: Dict[str, Any] = {
-    "history": [],            # list of completed/active signals
+    "history": [],
     "active_signal": None,
     "last_price": None,
     "last_price_at": None,
+    "last_price_change_at": None,  # last time the price actually changed
+    "ticks": deque(maxlen=600),     # (ts, price) - ~20 minutes at 2s polling
     "stats": {"total": 0, "wins": 0, "losses": 0},
-    "candles_cache": {},      # interval -> (ts, df)
+    "ta_cache": {"ts": 0, "data": None},
 }
 
-# Yahoo Finance symbol mappings for XAU/USD spot
-YF_SYMBOL = "GC=F"  # COMEX Gold Futures - tracks XAU/USD closely; used for indicators only
-TF_MAP = {
-    "1m": ("1m", "1d"),
-    "5m": ("5m", "5d"),
-    "15m": ("15m", "5d"),
-    "30m": ("30m", "1mo"),
-    "1h": ("60m", "1mo"),
-    "4h": ("60m", "3mo"),  # we'll resample
-    "1d": ("1d", "6mo"),
+# TradingView TA fields - covers all timeframes we need
+TV_TIMEFRAMES = {
+    "1m": "1",
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",   # not always returned; falls back to interpolation
+    "1h": "60",
+    "4h": "240",
+    "1d": "1D",
+    "1w": "1W",
 }
 
 
@@ -65,6 +63,7 @@ class PriceData(BaseModel):
     timestamp: str
     high: Optional[float] = None
     low: Optional[float] = None
+    fresh_seconds: int = 0  # seconds since last actual price change
 
 
 class Signal(BaseModel):
@@ -87,7 +86,6 @@ class Signal(BaseModel):
 
 # ---------------- Price fetchers ----------------
 async def fetch_tradingview_oanda() -> Optional[PriceData]:
-    """Public TradingView scanner endpoint for OANDA:XAUUSD."""
     url = "https://scanner.tradingview.com/symbol"
     params = {
         "symbol": "OANDA:XAUUSD",
@@ -121,7 +119,6 @@ async def fetch_tradingview_oanda() -> Optional[PriceData]:
 
 
 async def fetch_gold_api() -> Optional[PriceData]:
-    """Gold-API.com public spot price (no auth)."""
     url = "https://api.gold-api.com/price/XAU"
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
@@ -153,204 +150,272 @@ async def get_price(source: str = "tradingview") -> PriceData:
     else:
         p = await fetch_tradingview_oanda() or await fetch_gold_api()
     if p is None:
-        # last-resort fallback to last cached
         last = STATE.get("last_price") or 2650.0
         p = PriceData(
             price=last, change=0.0, change_pct=0.0, spread=0.30,
             source="cache", timestamp=datetime.now(timezone.utc).isoformat(),
         )
+    now = datetime.now(timezone.utc)
+    # Track tick buffer + freshness
+    if STATE["last_price"] is None or p.price != STATE["last_price"]:
+        STATE["last_price_change_at"] = now.timestamp()
     STATE["last_price"] = p.price
     STATE["last_price_at"] = p.timestamp
+    STATE["ticks"].append((now.timestamp(), p.price))
+    if STATE["last_price_change_at"]:
+        p.fresh_seconds = int(now.timestamp() - STATE["last_price_change_at"])
     return p
 
 
-# ---------------- Candles & indicators ----------------
-def _fetch_candles_sync(interval: str, period: str) -> pd.DataFrame:
-    df = yf.download(YF_SYMBOL, interval=interval, period=period, progress=False, auto_adjust=False)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    df = df.rename(columns=str.title)
-    df = df.dropna()
-    return df
+# ---------------- TradingView Technical Analysis ----------------
+def _build_tv_fields() -> str:
+    base = ["close", "change", "high", "low", "volume", "ATR"]
+    per_tf = ["RSI", "MACD.macd", "MACD.signal", "CCI20", "Mom",
+              "Recommend.All", "Recommend.MA", "Recommend.Other",
+              "BB.upper", "BB.lower"]
+    fields = list(base)
+    # default TF is no suffix; add suffixes for the rest
+    for ind in per_tf:
+        fields.append(ind)  # default (1d-ish, depends on TV)
+        for tf_label, tf_code in TV_TIMEFRAMES.items():
+            fields.append(f"{ind}|{tf_code}")
+    return ",".join(fields)
 
 
-async def get_candles(timeframe: str) -> pd.DataFrame:
-    if timeframe not in TF_MAP:
-        timeframe = "5m"
-    cached = STATE["candles_cache"].get(timeframe)
+async def fetch_tv_analysis() -> Dict[str, Any]:
+    cache = STATE["ta_cache"]
     now = time.time()
-    if cached and now - cached[0] < 30:
-        return cached[1]
-    interval, period = TF_MAP[timeframe]
-    try:
-        df = await asyncio.to_thread(_fetch_candles_sync, interval, period)
-        if timeframe == "4h" and not df.empty:
-            df = df.resample("4H").agg({
-                "Open": "first", "High": "max", "Low": "min",
-                "Close": "last", "Volume": "sum"
-            }).dropna()
-    except Exception as e:
-        logger.warning(f"yfinance fetch failed {timeframe}: {e}")
-        df = pd.DataFrame()
-    STATE["candles_cache"][timeframe] = (now, df)
-    return df
-
-
-def rsi(series: pd.Series, period: int = 14) -> float:
-    delta = series.diff().dropna()
-    if len(delta) < period:
-        return 50.0
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    avg_up = up.ewm(alpha=1 / period, adjust=False).mean()
-    avg_down = down.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_up / avg_down.replace(0, np.nan)
-    rsi_v = 100 - (100 / (1 + rs))
-    val = float(rsi_v.iloc[-1]) if not rsi_v.empty else 50.0
-    return round(val if not np.isnan(val) else 50.0, 2)
-
-
-def macd(series: pd.Series) -> Dict[str, float]:
-    ema12 = series.ewm(span=12, adjust=False).mean()
-    ema26 = series.ewm(span=26, adjust=False).mean()
-    macd_line = ema12 - ema26
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    hist = macd_line - signal_line
-    return {
-        "macd": round(float(macd_line.iloc[-1]), 3),
-        "signal": round(float(signal_line.iloc[-1]), 3),
-        "hist": round(float(hist.iloc[-1]), 3),
+    if cache["data"] and now - cache["ts"] < 8:
+        return cache["data"]
+    url = "https://scanner.tradingview.com/symbol"
+    params = {
+        "symbol": "OANDA:XAUUSD",
+        "fields": _build_tv_fields(),
+        "no_404": "true",
     }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url, params=params)
+            r.raise_for_status()
+            data = r.json()
+            STATE["ta_cache"] = {"ts": now, "data": data}
+            return data
+    except Exception as e:
+        logger.warning(f"TV TA fetch failed: {e}")
+        return cache["data"] or {}
 
 
-def cci(df: pd.DataFrame, period: int = 20) -> float:
-    if len(df) < period:
-        return 0.0
-    tp = (df["High"] + df["Low"] + df["Close"]) / 3
-    sma = tp.rolling(period).mean()
-    mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=False)
-    cci_v = (tp - sma) / (0.015 * mad.replace(0, np.nan))
-    val = float(cci_v.iloc[-1])
-    return round(val if not np.isnan(val) else 0.0, 2)
+def _get_tv(d: Dict[str, Any], key: str, tf_code: Optional[str] = None, default=0.0) -> float:
+    k = f"{key}|{tf_code}" if tf_code else key
+    v = d.get(k)
+    if v is None:
+        v = d.get(key)
+    try:
+        return float(v) if v is not None else float(default)
+    except (TypeError, ValueError):
+        return float(default)
 
 
-def bollinger(series: pd.Series, period: int = 20, num_std: float = 2.0) -> Dict[str, float]:
-    if len(series) < period:
-        last = float(series.iloc[-1])
-        return {"upper": last, "mid": last, "lower": last, "pos": 0.5}
-    sma = series.rolling(period).mean()
-    std = series.rolling(period).std()
-    upper = sma + num_std * std
-    lower = sma - num_std * std
-    last = float(series.iloc[-1])
-    u = float(upper.iloc[-1]); l = float(lower.iloc[-1]); m = float(sma.iloc[-1])
-    pos = (last - l) / (u - l) if u != l else 0.5
-    return {"upper": round(u, 2), "mid": round(m, 2), "lower": round(l, 2), "pos": round(pos, 3)}
-
-
-def momentum(series: pd.Series, period: int = 10) -> float:
-    if len(series) < period + 1:
-        return 0.0
-    return round(float(series.iloc[-1] - series.iloc[-period - 1]), 2)
-
-
-def atr(df: pd.DataFrame, period: int = 14) -> float:
-    if len(df) < period + 1:
-        return float(df["Close"].iloc[-1]) * 0.001 if not df.empty else 1.0
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - df["Close"].shift()).abs(),
-        (df["Low"] - df["Close"].shift()).abs(),
-    ], axis=1).max(axis=1)
-    return round(float(tr.rolling(period).mean().iloc[-1]), 2)
-
-
-def analyze_timeframe(df: pd.DataFrame) -> Dict[str, Any]:
-    """Return signal analysis for a given OHLC dataframe."""
-    if df.empty or len(df) < 30:
+def analyze_timeframe_tv(tv: Dict[str, Any], timeframe: str, current_price: float) -> Dict[str, Any]:
+    """Analyze using TradingView's pre-computed indicators for a specific timeframe."""
+    tf_code = TV_TIMEFRAMES.get(timeframe, "5")
+    if not tv:
         return {
             "direction": "NEUTRAL", "score": 0, "confidence": 0,
-            "rsi": 50, "macd": 0, "cci": 0, "bb_pos": 0.5,
-            "momentum": 0, "atr": 0, "close": 0, "volume_ratio": 1.0,
+            "rsi": 50, "macd": 0, "macd_hist": 0, "cci": 0, "bb_pos": 0.5,
+            "momentum": 0, "atr": max(current_price * 0.0008, 0.5), "close": current_price,
+            "volume_ratio": 1.0, "tv_recommend": 0,
         }
-    close = df["Close"]
-    r = rsi(close)
-    m = macd(close)
-    c = cci(df)
-    bb = bollinger(close)
-    mom = momentum(close)
-    a = atr(df)
-    last_close = round(float(close.iloc[-1]), 2)
+    rsi_v = _get_tv(tv, "RSI", tf_code, 50)
+    macd_line = _get_tv(tv, "MACD.macd", tf_code, 0)
+    macd_sig = _get_tv(tv, "MACD.signal", tf_code, 0)
+    cci_v = _get_tv(tv, "CCI20", tf_code, 0)
+    mom_v = _get_tv(tv, "Mom", tf_code, 0)
+    bb_up = _get_tv(tv, "BB.upper", tf_code, current_price)
+    bb_lo = _get_tv(tv, "BB.lower", tf_code, current_price)
+    rec_all = _get_tv(tv, "Recommend.All", tf_code, 0)  # -1..+1
+    atr_v = _get_tv(tv, "ATR", None, max(current_price * 0.0008, 0.5))
 
-    vol_ratio = 1.0
-    if "Volume" in df.columns:
-        try:
-            vmean = float(df["Volume"].rolling(20).mean().iloc[-1])
-            vlast = float(df["Volume"].iloc[-1])
-            if vmean > 0:
-                vol_ratio = round(vlast / vmean, 2)
-        except Exception:
-            pass
+    # BB position
+    bb_pos = 0.5
+    if bb_up != bb_lo:
+        bb_pos = round((current_price - bb_lo) / (bb_up - bb_lo), 3)
 
-    # Scoring (-100..100)
-    score = 0
-    # RSI: oversold->buy, overbought->sell
-    if r < 30: score += 20
-    elif r < 45: score += 10
-    elif r > 70: score -= 20
-    elif r > 55: score -= 10
-    # MACD histogram
-    if m["hist"] > 0: score += 15
-    elif m["hist"] < 0: score -= 15
-    # MACD line vs signal
-    if m["macd"] > m["signal"]: score += 10
-    else: score -= 10
-    # CCI
-    if c > 100: score += 15
-    elif c > 0: score += 7
-    elif c < -100: score -= 15
-    elif c < 0: score -= 7
-    # Bollinger position
-    if bb["pos"] < 0.2: score += 15  # near lower band -> buy
-    elif bb["pos"] > 0.8: score -= 15
-    # Momentum
-    if mom > 0: score += 10
-    elif mom < 0: score -= 10
-    # Volume confirmation
-    if vol_ratio > 1.3: score = int(score * 1.1)
+    # Score: weighted combination, primarily TradingView Recommend (-1..+1) -> -100..+100
+    score = int(rec_all * 100)
+    # Reinforce with extremes
+    if rsi_v < 30: score += 8
+    elif rsi_v > 70: score -= 8
+    if macd_line > macd_sig: score += 5
+    else: score -= 5
+    if cci_v > 100: score += 5
+    elif cci_v < -100: score -= 5
+    score = max(-100, min(100, score))
 
-    score = int(max(-100, min(100, score)))
     if score >= 25:
         direction = "BUY"
     elif score <= -25:
         direction = "SELL"
     else:
         direction = "NEUTRAL"
-
     confidence = min(99, abs(score) + 30)
 
     return {
         "direction": direction,
         "score": score,
         "confidence": confidence,
-        "rsi": r,
-        "macd": m["macd"],
-        "macd_hist": m["hist"],
-        "cci": c,
-        "bb_pos": bb["pos"],
-        "momentum": mom,
-        "atr": a,
-        "close": last_close,
-        "volume_ratio": vol_ratio,
+        "rsi": round(rsi_v, 2),
+        "macd": round(macd_line, 3),
+        "macd_hist": round(macd_line - macd_sig, 3),
+        "cci": round(cci_v, 2),
+        "bb_pos": bb_pos,
+        "momentum": round(mom_v, 2),
+        "atr": round(atr_v, 2),
+        "close": round(current_price, 2),
+        "volume_ratio": 1.0,
+        "tv_recommend": round(rec_all, 3),
+    }
+
+
+# ---------------- Recommendation engine ----------------
+def detect_sudden_move(direction_against: Literal["BUY", "SELL"], atr_value: float) -> Dict[str, Any]:
+    """Look at last ~30s of ticks: if move against signal > 1.0×ATR_minute, flag reversal."""
+    ticks = list(STATE["ticks"])
+    if len(ticks) < 6:
+        return {"reversal": False, "delta": 0.0}
+    now_ts = ticks[-1][0]
+    window = [t for t in ticks if now_ts - t[0] <= 45]
+    if len(window) < 3:
+        return {"reversal": False, "delta": 0.0}
+    prices = [p for _, p in window]
+    delta = prices[-1] - prices[0]
+    # ATR is daily/multi-TF; convert to short-window threshold (~ ATR/30)
+    threshold = max(atr_value / 30.0, 0.4)
+    if direction_against == "BUY" and delta < -threshold:
+        return {"reversal": True, "delta": round(delta, 2), "threshold": round(threshold, 2)}
+    if direction_against == "SELL" and delta > threshold:
+        return {"reversal": True, "delta": round(delta, 2), "threshold": round(threshold, 2)}
+    return {"reversal": False, "delta": round(delta, 2), "threshold": round(threshold, 2)}
+
+
+def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """Return action, label, color, message, urgency."""
+    if not signal:
+        return {
+            "action": "ESPERAR",
+            "label": "ESPERAR",
+            "headline": "Mercado neutral · Sin señal activa",
+            "message": "Esperando confirmación de tendencia. No operes ahora.",
+            "urgency": "low",
+            "tone": "neutral",
+        }
+
+    entry = signal["entry"]
+    sl = signal["stop_loss"]
+    tp1 = signal["tp1"]
+    tp2 = signal["tp2"]
+    tp3 = signal["tp3"]
+    direction = signal["direction"]
+    isBuy = direction == "BUY"
+    expires_at = datetime.fromisoformat(signal["expires_at"])
+    now = datetime.now(timezone.utc)
+    minutes_left = max(0, int((expires_at - now).total_seconds() / 60))
+
+    # Stop Loss hit?
+    if (isBuy and price <= sl) or (not isBuy and price >= sl):
+        return {
+            "action": "STOP_LOSS_HIT",
+            "label": "STOP LOSS",
+            "headline": "Stop Loss alcanzado · Cierra ahora",
+            "message": f"Precio {price:.2f} tocó SL {sl:.2f}. Cierra inmediatamente para limitar pérdida.",
+            "urgency": "high",
+            "tone": "danger",
+        }
+
+    # TP3 reached? (full take profit)
+    if (isBuy and price >= tp3) or (not isBuy and price <= tp3):
+        return {
+            "action": "TOMAR_GANANCIAS",
+            "label": "TP3 ALCANZADO",
+            "headline": "Objetivo final alcanzado · Cierra todo",
+            "message": f"Precio {price:.2f} alcanzó TP3 {tp3:.2f}. Cierra posición completa.",
+            "urgency": "high",
+            "tone": "success",
+        }
+
+    # TP2 reached?
+    if (isBuy and price >= tp2) or (not isBuy and price <= tp2):
+        return {
+            "action": "TOMAR_GANANCIAS",
+            "label": "TP2 ALCANZADO",
+            "headline": "Toma parcial · Mueve SL a TP1",
+            "message": f"Precio {price:.2f} alcanzó TP2 {tp2:.2f}. Cierra 60% y mueve stop a TP1.",
+            "urgency": "medium",
+            "tone": "success",
+        }
+
+    # TP1 reached?
+    if (isBuy and price >= tp1) or (not isBuy and price <= tp1):
+        return {
+            "action": "TOMAR_GANANCIAS",
+            "label": "TP1 ALCANZADO",
+            "headline": "Toma parcial · Mueve SL a entrada",
+            "message": f"Precio {price:.2f} alcanzó TP1 {tp1:.2f}. Cierra 30-50% y protege entrada.",
+            "urgency": "medium",
+            "tone": "success",
+        }
+
+    # Sudden reversal against signal?
+    move = detect_sudden_move("BUY" if isBuy else "SELL", analysis.get("atr", 1.0))
+    if move["reversal"]:
+        return {
+            "action": "CERRAR_REVERSO",
+            "label": "REVERSO BRUSCO",
+            "headline": "Movimiento adverso fuerte · Considera cerrar",
+            "message": f"Precio se movió {move['delta']:+.2f} en últimos 45s contra tu posición. Evalúa cierre.",
+            "urgency": "high",
+            "tone": "danger",
+        }
+
+    # If signal is fresh and price near entry → TOMAR
+    near_entry = abs(price - entry) / entry <= 0.0015  # within 0.15%
+    if near_entry and signal["confidence"] >= 70:
+        return {
+            "action": "TOMAR",
+            "label": "TOMAR AHORA",
+            "headline": f"Toma señal {direction} · Precio cerca de entrada",
+            "message": f"Precio {price:.2f} cerca de {entry:.2f}. Confianza {signal['confidence']}%. Quedan {minutes_left}min.",
+            "urgency": "high",
+            "tone": "buy" if isBuy else "sell",
+        }
+
+    # Price drifted from entry
+    drift_pct = abs(price - entry) / entry * 100
+    if drift_pct > 0.3:
+        return {
+            "action": "ESPERAR",
+            "label": "ESPERAR",
+            "headline": "Precio se alejó · Espera retroceso",
+            "message": f"Precio {price:.2f} se movió {drift_pct:.2f}% desde entrada {entry:.2f}. Espera retroceso o nueva señal.",
+            "urgency": "low",
+            "tone": "neutral",
+        }
+
+    # Mid-range hold
+    return {
+        "action": "MANTENER",
+        "label": "MANTENER POSICIÓN",
+        "headline": f"Posición {direction} en curso",
+        "message": f"P&L vivo. Próximo objetivo TP1 en {tp1:.2f}. Mantén SL en {sl:.2f}.",
+        "urgency": "low",
+        "tone": "buy" if isBuy else "sell",
     }
 
 
 # ---------------- API endpoints ----------------
 @api_router.get("/")
 async def root():
-    return {"service": "XAUUSD Signals API", "ok": True}
+    return {"service": "XAUUSD Signals API", "ok": True, "version": "2.0"}
 
 
 @api_router.get("/price")
@@ -361,7 +426,6 @@ async def api_price(source: str = Query("tradingview", pattern="^(tradingview|go
 
 @api_router.get("/sessions")
 async def api_sessions():
-    """Market sessions in UTC."""
     now = datetime.now(timezone.utc)
     h = now.hour + now.minute / 60.0
     sessions = [
@@ -374,17 +438,10 @@ async def api_sessions():
     active_count = 0
     for s in sessions:
         o, c = s["open"], s["close"]
-        if o < c:
-            active = o <= h < c
-        else:
-            active = h >= o or h < c
+        active = (o <= h < c) if o < c else (h >= o or h < c)
         if active:
             active_count += 1
-        out.append({
-            "name": s["name"], "active": active, "tz": s["tz"],
-            "open": s["open"], "close": s["close"],
-        })
-    # Determine session label
+        out.append({**s, "active": active})
     label = "ASIA"
     if any(s["name"] == "London" and s["active"] for s in out):
         label = "LONDRES"
@@ -399,33 +456,31 @@ async def api_sessions():
 @api_router.get("/multi-timeframe")
 async def api_multi_timeframe():
     timeframes = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-    results = {}
-    for tf in timeframes:
-        df = await get_candles(tf)
-        results[tf] = analyze_timeframe(df)
-    return {"timeframes": results, "updated_at": datetime.now(timezone.utc).isoformat()}
+    tv = await fetch_tv_analysis()
+    price = STATE.get("last_price") or _get_tv(tv, "close", None, 2650)
+    results = {tf: analyze_timeframe_tv(tv, tf, price) for tf in timeframes}
+    return {"timeframes": results, "updated_at": datetime.now(timezone.utc).isoformat(),
+            "source": "TradingView · OANDA spot"}
 
 
 @api_router.get("/strength")
 async def api_strength():
-    """Combined strength bars based on 5m + 15m + 1h."""
-    df5 = await get_candles("5m")
-    df15 = await get_candles("15m")
-    df1h = await get_candles("1h")
-
-    a5 = analyze_timeframe(df5)
-    a15 = analyze_timeframe(df15)
-    a1h = analyze_timeframe(df1h)
+    tv = await fetch_tv_analysis()
+    price = STATE.get("last_price") or _get_tv(tv, "close", None, 2650)
+    a5 = analyze_timeframe_tv(tv, "5m", price)
+    a15 = analyze_timeframe_tv(tv, "15m", price)
+    a1h = analyze_timeframe_tv(tv, "1h", price)
 
     trend = round((abs(a5["score"]) + abs(a15["score"]) + abs(a1h["score"])) / 3)
-    momentum_score = round(min(100, abs(a5["momentum"] / max(a5["atr"], 0.01)) * 30 + 30))
-    # Volatility from ATR % of price
-    last = a5["close"] or STATE["last_price"] or 2650
-    vol_pct = round(min(100, (a5["atr"] / max(last, 1)) * 1000))
-    volume = round(min(100, a5["volume_ratio"] * 50))
+    momentum_score = min(100, int(abs(a5["momentum"] / max(a5["atr"], 0.01)) * 30 + 30))
+    last = a5["close"] or price or 2650
+    vol_pct = min(100, int((a5["atr"] / max(last, 1)) * 1000))
+    # Volume from TradingView (24h)
+    vol_v = _get_tv(tv, "volume", None, 0)
+    volume = min(100, max(20, int(vol_v / 5000))) if vol_v else 50
     confidence = round((trend + momentum_score) / 2)
     return {
-        "trend": trend,
+        "trend": int(trend),
         "momentum": int(momentum_score),
         "volatility": int(vol_pct),
         "volume": int(volume),
@@ -438,24 +493,28 @@ def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float) -> 
     if direction == "NEUTRAL":
         return None
     a = max(analysis["atr"], 0.5)
+    # Scale ATR per timeframe - higher TF = larger ATR-based stops
+    tf_atr_scale = {"1m": 0.15, "5m": 0.25, "15m": 0.4, "30m": 0.6, "1h": 0.8, "4h": 1.0, "1d": 1.2}.get(timeframe, 0.3)
+    eff_a = a * tf_atr_scale
     if direction == "BUY":
         entry = price_now
-        sl = round(entry - a * 1.2, 2)
-        tp1 = round(entry + a * 1.0, 2)
-        tp2 = round(entry + a * 2.0, 2)
-        tp3 = round(entry + a * 3.5, 2)
+        sl = round(entry - eff_a * 1.2, 2)
+        tp1 = round(entry + eff_a * 1.0, 2)
+        tp2 = round(entry + eff_a * 2.0, 2)
+        tp3 = round(entry + eff_a * 3.5, 2)
     else:
         entry = price_now
-        sl = round(entry + a * 1.2, 2)
-        tp1 = round(entry - a * 1.0, 2)
-        tp2 = round(entry - a * 2.0, 2)
-        tp3 = round(entry - a * 3.5, 2)
+        sl = round(entry + eff_a * 1.2, 2)
+        tp1 = round(entry - eff_a * 1.0, 2)
+        tp2 = round(entry - eff_a * 2.0, 2)
+        tp3 = round(entry - eff_a * 3.5, 2)
 
     expires_minutes = {"1m": 3, "5m": 15, "15m": 45, "30m": 90, "1h": 240, "4h": 960, "1d": 1440}.get(timeframe, 15)
     now = datetime.now(timezone.utc)
     macd_v = analysis.get("macd", 0)
     label = "alcista fuerte" if direction == "BUY" else "bajista fuerte"
-    analysis_text = f"Tendencia {label} - MACD {macd_v} (SCALPING)"
+    tf_label = "SCALPING" if timeframe in ("1m", "5m", "15m") else "INTRADÍA" if timeframe in ("30m", "1h") else "SWING"
+    analysis_text = f"Tendencia {label} - MACD {macd_v} ({tf_label})"
 
     return Signal(
         id=str(uuid.uuid4()),
@@ -474,24 +533,24 @@ def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float) -> 
 
 @api_router.get("/signal/active")
 async def api_active_signal(timeframe: str = Query("5m")):
-    if timeframe not in TF_MAP:
+    if timeframe not in TV_TIMEFRAMES:
         timeframe = "5m"
-    df = await get_candles(timeframe)
-    analysis = analyze_timeframe(df)
+    tv = await fetch_tv_analysis()
     price = await get_price("tradingview")
+    analysis = analyze_timeframe_tv(tv, timeframe, price.price)
 
-    # If active signal still valid for same timeframe, return it
     cur = STATE.get("active_signal")
     if cur and cur["timeframe"] == timeframe:
         if datetime.fromisoformat(cur["expires_at"]) > datetime.now(timezone.utc):
-            # Update P&L
             entry = cur["entry"]
             if cur["direction"] == "BUY":
                 pnl = ((price.price - entry) / entry) * 100
             else:
                 pnl = ((entry - price.price) / entry) * 100
             cur["pnl_pct"] = round(pnl, 3)
-            return {"signal": cur, "analysis": analysis, "price": price.model_dump()}
+            recommendation = compute_recommendation(cur, price.price, analysis)
+            return {"signal": cur, "analysis": analysis, "price": price.model_dump(),
+                    "recommendation": recommendation}
 
     new_sig = _make_signal(analysis, timeframe, price.price)
     if new_sig:
@@ -499,16 +558,34 @@ async def api_active_signal(timeframe: str = Query("5m")):
         STATE["history"].insert(0, STATE["active_signal"])
         STATE["history"] = STATE["history"][:50]
         STATE["stats"]["total"] += 1
+    sig_obj = STATE.get("active_signal") if (new_sig and STATE["active_signal"]["id"] == new_sig.id) else None
+    recommendation = compute_recommendation(sig_obj, price.price, analysis)
+    return {"signal": sig_obj, "analysis": analysis, "price": price.model_dump(),
+            "recommendation": recommendation}
+
+
+@api_router.get("/recommendation")
+async def api_recommendation(timeframe: str = Query("5m")):
+    """Standalone recommendation endpoint (faster polling)."""
+    tv = await fetch_tv_analysis()
+    price = await get_price("tradingview")
+    analysis = analyze_timeframe_tv(tv, timeframe, price.price)
+    sig = STATE.get("active_signal")
+    if sig and sig["timeframe"] == timeframe:
+        if datetime.fromisoformat(sig["expires_at"]) <= datetime.now(timezone.utc):
+            sig = None
+    rec = compute_recommendation(sig, price.price, analysis)
+    # Include short stats for UI
     return {
-        "signal": STATE.get("active_signal") if (new_sig and STATE["active_signal"]["id"] == new_sig.id) else None,
-        "analysis": analysis,
+        "recommendation": rec,
         "price": price.model_dump(),
+        "signal_id": sig["id"] if sig else None,
+        "signal_direction": sig["direction"] if sig else None,
     }
 
 
 @api_router.get("/signal/history")
 async def api_history():
-    # Update outcomes for expired signals
     now = datetime.now(timezone.utc)
     last_price = STATE.get("last_price") or 0
     for s in STATE["history"]:
@@ -516,10 +593,7 @@ async def api_history():
             continue
         if datetime.fromisoformat(s["expires_at"]) < now:
             entry = s["entry"]
-            if s["direction"] == "BUY":
-                pnl = ((last_price - entry) / entry) * 100
-            else:
-                pnl = ((entry - last_price) / entry) * 100
+            pnl = ((last_price - entry) / entry) * 100 if s["direction"] == "BUY" else ((entry - last_price) / entry) * 100
             s["pnl_pct"] = round(pnl, 3)
             if pnl >= 0.05:
                 s["status"] = "won"; STATE["stats"]["wins"] += 1
@@ -532,20 +606,18 @@ async def api_history():
 
 @api_router.get("/binary/next-candle")
 async def api_binary_next():
-    """Predict CALL/PUT for 1m and 5m next candles."""
-    df1 = await get_candles("1m")
-    df5 = await get_candles("5m")
-    a1 = analyze_timeframe(df1)
-    a5 = analyze_timeframe(df5)
+    tv = await fetch_tv_analysis()
+    price = STATE.get("last_price") or _get_tv(tv, "close", None, 2650)
+    a1 = analyze_timeframe_tv(tv, "1m", price)
+    a5 = analyze_timeframe_tv(tv, "5m", price)
 
     def to_binary(a):
         if a["score"] > 0:
             return {"direction": "CALL", "confidence": min(99, max(50, abs(a["score"]) + 30))}
-        elif a["score"] < 0:
+        if a["score"] < 0:
             return {"direction": "PUT", "confidence": min(99, max(50, abs(a["score"]) + 30))}
         return {"direction": "NEUTRAL", "confidence": 50}
 
-    # Seconds until next minute boundary (UTC)
     now = datetime.now(timezone.utc)
     sec_to_1m = 60 - now.second
     sec_to_5m = (5 - (now.minute % 5)) * 60 - now.second
@@ -564,9 +636,7 @@ async def api_stats():
     total_closed = s["wins"] + s["losses"]
     win_rate = round((s["wins"] / total_closed) * 100, 1) if total_closed else 100.0
     active = sum(1 for x in STATE["history"] if x["status"] == "active")
-    avg_conf = 0
-    if STATE["history"]:
-        avg_conf = round(sum(x["confidence"] for x in STATE["history"]) / len(STATE["history"]), 1)
+    avg_conf = round(sum(x["confidence"] for x in STATE["history"]) / len(STATE["history"]), 1) if STATE["history"] else 0
     return {
         "active_signals": active,
         "total_signals": s["total"],

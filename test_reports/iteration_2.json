@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 2 testing complete. 14/14 backend pytest cases passed against public URL covering: TradingView OANDA spot multi-timeframe (no Yahoo/GC=F), fresh_seconds field & progression on /api/price, new /api/recommendation endpoint, /api/signal/active now includes recommendation with all required fields (action/label/headline/message/urgency/tone), and source code grep confirms all 6 action labels (TOMAR, ESPERAR, MANTENER, TOMAR_GANANCIAS, CERRAR_REVERSO, STOP_LOSS_HIT). Frontend Playwright tests: dashboard-root loads with zero JS errors, RecommendationBanner appears with label='ESPERAR', headline='Mercado neutral · Sin señal activa' and message visible; VoiceSettings card has all 5 controls (toggle, selector, rate, volume, test); voice-toggle correctly alternates ACTIVADAS/DESACTIVADAS; voice-test button enables/disables in sync with toggle; voice-selector includes 'Auto' option (only that option in headless Chromium - expected since no speechSynthesis voices in headless browser); price ticker shows 'tick 15s' freshness indicator; SourceSelector shows TradingView (OANDA) + Gold-API.com (LBMA) with no mention of Yahoo or GC=F.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard initial render", "issues": ["Recharts emits 2 console warnings: 'The width(-1) and height(-1) of chart should be greater than 0' on initial mount (likely BullsBearsGauge or StrengthBars). Non-blocking, charts render correctly after layout settles. Could be fixed by setting minWidth/minHeight on ResponsiveContainer."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional: silence Recharts 'width(-1)/height(-1)' warnings by adding minWidth/minHeight to ResponsiveContainer wrappers."
+  ],
+  "critical_code_review_comments": [
+    "voice-selector populated only via window.speechSynthesis (Web Speech API) — works on real desktop browsers but headless Chromium has no voices; UI correctly shows 'Cargando voces del navegador…' fallback. Behaviour acceptable per spec.",
+    "STATE['ticks'] deque is keyed only on price-changed timestamps via tick buffer; if multiple users hit /api/price simultaneously across processes, fresh_seconds is global (not per-session). OK for single-tenant dashboard.",
+    "compute_recommendation evaluates TP1/TP2/TP3 in order — once TP1 is breached the response always says 'TP1 ALCANZADO' even after TP2 because the if-chain checks TP3 first then TP2 then TP1; logic actually correct (TP3 highest hit wins).",
+    "ta_cache TTL is 8s while polling is 4-15s on frontend → fine. Indicator data is shared across all timeframes from a single TradingView call which is efficient.",
+    "/api/recommendation calls fetch_tv_analysis + get_price every 2s on the frontend — could be optimised but acceptable for now."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/iteration_2.json",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100%"},
+  "test_credentials": "N/A - public endpoints, no auth",
+  "seed_data_creation": "None - signals self-generate from live TradingView OANDA spot",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend uses TradingView TA endpoint (https://scanner.tradingview.com/symbol with OANDA:XAUUSD). yfinance/pandas fully removed. fresh_seconds is computed against STATE['last_price_change_at'] global timestamp. Recommendation engine has 6 actions; tone maps to UI colour (buy=emerald, sell=rose, danger=rose ring, success=emerald ring, neutral=zinc). VoiceSettings localStorage key managed by /app/frontend/src/lib/voice.js. Frontend data-testids: dashboard-root, live-price-ticker, recommendation-banner, rec-label, rec-headline, voice-settings, voice-toggle, voice-selector, voice-rate, voice-volume, voice-test, voice-alerts-open, voice-alert-{new_signal,take_now,take_profit,stop_loss,reversal,wait}, source-selector, source-tradingview, source-goldapi, tf-{1m..1d}.",
+  "rca of the issue": "No bugs found in iteration 2. All requested features (recommendation engine, voice settings UI, fresh_seconds tick buffer, removal of Yahoo/yfinance, new /api/recommendation endpoint) verified working correctly."
+}

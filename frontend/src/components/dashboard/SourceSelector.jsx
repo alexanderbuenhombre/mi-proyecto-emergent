@@ -1,8 +1,8 @@
 import { CandlestickChart } from "lucide-react";
 
 const SOURCES = [
-  { id: "tradingview", label: "TradingView (OANDA)", note: "Spot · coincide con Exness/XM/IC Markets" },
-  { id: "goldapi", label: "Gold-API.com", note: "Spot LBMA agregado · cross-check independiente" },
+  { id: "tradingview", label: "TradingView (OANDA)", note: "Spot · coincide con Exness/XM/IC Markets MT4" },
+  { id: "goldapi", label: "Gold-API.com (LBMA)", note: "Spot LBMA agregado · cross-check independiente" },
 ];
 
 export default function SourceSelector({ value, onChange }) {

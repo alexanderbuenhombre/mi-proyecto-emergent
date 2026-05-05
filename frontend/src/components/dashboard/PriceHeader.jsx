@@ -66,9 +66,12 @@ export default function PriceHeader({ price, sessions }) {
           </div>
         </div>
       </div>
-      <div className="px-5 pb-3 text-[11px] text-zinc-500 font-mono-num flex flex-wrap gap-3">
+      <div className="px-5 pb-3 text-[11px] text-zinc-500 font-mono-num flex flex-wrap gap-3 items-center">
         <span>Fuente: {price.source}</span>
         <span>· Actualizado: {new Date(price.timestamp).toLocaleTimeString("es-ES")}</span>
+        <span className={`px-1.5 py-0.5 rounded ${price.fresh_seconds <= 5 ? "bg-emerald-500/15 text-emerald-400" : price.fresh_seconds <= 15 ? "bg-amber-500/15 text-amber-400" : "bg-rose-500/15 text-rose-400"}`}>
+          tick {price.fresh_seconds}s
+        </span>
       </div>
     </div>
   );

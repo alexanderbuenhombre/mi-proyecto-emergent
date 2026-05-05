@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   fetchPrice, fetchSessions, fetchMultiTF, fetchStrength,
   fetchActiveSignal, fetchHistory, fetchBinary, fetchStats,
 } from "../lib/signalsApi";
 import { usePolling } from "../lib/usePolling";
+import { loadVoiceSettings } from "../lib/voice";
+import { useVoiceAlerts } from "../lib/useVoiceAlerts";
 import PriceHeader from "../components/dashboard/PriceHeader";
 import ActiveSignalCard from "../components/dashboard/ActiveSignalCard";
 import BullsBearsGauge from "../components/dashboard/BullsBearsGauge";
@@ -14,32 +16,45 @@ import SignalHistory from "../components/dashboard/SignalHistory";
 import NextCandleBinary from "../components/dashboard/NextCandleBinary";
 import SystemStats from "../components/dashboard/SystemStats";
 import SourceSelector from "../components/dashboard/SourceSelector";
+import VoiceSettings from "../components/dashboard/VoiceSettings";
+import RecommendationBanner from "../components/dashboard/RecommendationBanner";
 
 export default function Dashboard() {
   const [source, setSource] = useState("tradingview");
   const [tf, setTf] = useState("5m");
+  const [voiceSettings, setVoiceSettings] = useState(() => loadVoiceSettings());
 
-  const price = usePolling(() => fetchPrice(source), 4000, [source]);
+  const price = usePolling(() => fetchPrice(source), 2000, [source]);
   const sessions = usePolling(fetchSessions, 30000);
-  const multi = usePolling(fetchMultiTF, 30000);
-  const strength = usePolling(fetchStrength, 15000);
-  const activeSig = usePolling(() => fetchActiveSignal(tf), 12000, [tf]);
+  const multi = usePolling(fetchMultiTF, 15000);
+  const strength = usePolling(fetchStrength, 10000);
+  const activeSig = usePolling(() => fetchActiveSignal(tf), 6000, [tf]);
   const history = usePolling(fetchHistory, 15000);
-  const binary = usePolling(fetchBinary, 5000);
+  const binary = usePolling(fetchBinary, 4000);
   const stats = usePolling(fetchStats, 15000);
 
   const tfAnalysis = multi.data?.timeframes?.[tf];
+  const recommendation = activeSig.data?.recommendation;
+
+  useVoiceAlerts({
+    signal: activeSig.data?.signal,
+    recommendation,
+    settings: voiceSettings,
+  });
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 p-3 sm:p-5 lg:p-6" data-testid="dashboard-root">
       <div className="max-w-[1600px] mx-auto space-y-4">
         <PriceHeader price={price.data} sessions={sessions.data} />
 
+        {recommendation && <RecommendationBanner rec={recommendation} />}
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
           {/* LEFT */}
           <div className="lg:col-span-3 flex flex-col gap-4">
             <BullsBearsGauge analysis={tfAnalysis} />
             <SourceSelector value={source} onChange={setSource} />
+            <VoiceSettings onChange={setVoiceSettings} />
             <SystemStats data={stats.data} />
           </div>
 
@@ -59,7 +74,7 @@ export default function Dashboard() {
         </div>
 
         <footer className="text-center text-[11px] text-zinc-600 pt-4 pb-2">
-          XAU/USD Real-Time Signals · Educacional, no es asesoría financiera. Trading conlleva riesgo.
+          XAU/USD Real-Time Signals · TradingView OANDA spot + Gold-API LBMA · Educacional, no es asesoría financiera.
         </footer>
       </div>
     </div>
