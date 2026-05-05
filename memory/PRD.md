@@ -38,7 +38,24 @@
 - Spanish UI throughout
 - All `data-testid` attributes for testing
 
-## Implemented (Iteration 2 - 2026-02-05)
+## Implemented (Iteration 3 - 2026-02-05)
+- **High-probability strategy** with multi-TF confluence:
+  - `compute_confluence()` checks 3 surrounding TFs and counts how many agree on direction
+  - `compute_probability()` returns ULTRA/ALTA/MEDIA/BAJA based on score + confluence + session liquidity bonus
+  - **STRICT FILTER**: signals only generated when probability is ALTA or ULTRA AND confluence direction matches analysis direction → no more low-probability noise
+- **Explicit "Recomendable" recommendation** in every alert:
+  - New fields in `/api/recommendation` and `/api/signal/active`: `take` (bool), `take_label` (RECOMENDABLE/NO RECOMENDABLE/CERRAR AHORA/TOMAR PARCIAL), `take_reason` (justificación clara)
+  - RecommendationBanner shows probability badge (ULTRA/ALTA/MEDIA/BAJA) + dedicated take-recommendation strip with check/X icon
+  - Voice alerts now include "Es recomendable tomar la señal" / "No es recomendable tomar la señal"
+- **Bulls & Bears gauge** rediseñado con SVG inline (matches reference image):
+  - Semicírculo con gradiente continuo rojo→ámbar→verde
+  - 5 etiquetas curvadas: Venta Fuerte, Venta, Neutral, Compra, Compra Fuerte
+  - Aguja animada (transition cubic-bezier 900ms)
+  - Histograma de barras de tendencia (36 barras coloreadas por dirección)
+  - RSI / CCI / Trends en grid de 3 columnas
+  - Etiqueta inferior "Venta Fuerte (5m)" según score actual
+- **ConfluencePanel** nuevo: muestra los 3 TFs analizados con dirección y veredicto consolidado
+
 - **Real-time data 100%**: Eliminated Yahoo Finance / `GC=F` (descuadraba con MT4). All indicators (RSI/MACD/CCI/BB/Mom/ATR) now come from TradingView Technical Analysis API on OANDA:XAUUSD spot — same feed as displayed price → matches Exness/XM/IC Markets MT4 perfectly.
 - **Tick freshness**: backend ring-buffer of last 600 ticks; `fresh_seconds` field shows seconds since real price change. Frontend price polling 2s.
 - **Dynamic recommendations** (`/api/recommendation`): 6 actions — TOMAR, ESPERAR, MANTENER, TOMAR_GANANCIAS (TP1/2/3), CERRAR_REVERSO (sudden adverse move > ATR/30 in 45s window), STOP_LOSS_HIT.
