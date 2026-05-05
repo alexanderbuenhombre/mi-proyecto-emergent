@@ -1,0 +1,111 @@
+{
+  "project": "XAUUSD Real-Time Trading Signals Dashboard",
+  "language": "es",
+  "theme": "dark",
+  "archetype": "Swiss & High-Contrast (Data/Finance Variant)",
+  "colors": {
+    "background": "#09090B",
+    "surface": "#18181B",
+    "surface_hover": "#27272A",
+    "border": "#27272A",
+    "text_primary": "#FAFAFA",
+    "text_secondary": "#A1A1AA",
+    "brand_gold": "#F59E0B",
+    "signal_buy": "#10B981",
+    "signal_buy_bg": "rgba(16, 185, 129, 0.1)",
+    "signal_sell": "#F43F5E",
+    "signal_sell_bg": "rgba(244, 63, 94, 0.1)",
+    "warning": "#EAB308",
+    "info": "#3B82F6"
+  },
+  "typography": {
+    "heading_font": "Manrope",
+    "body_font": "Manrope",
+    "number_font": "JetBrains Mono",
+    "hierarchy": {
+      "h1": "text-3xl sm:text-4xl tracking-tight font-bold",
+      "h2": "text-xl sm:text-2xl tracking-tight font-bold",
+      "h3": "text-lg font-semibold",
+      "body": "text-sm text-zinc-400",
+      "numbers_large": "text-4xl font-mono font-bold tracking-tighter",
+      "numbers_medium": "text-xl font-mono font-semibold"
+    }
+  },
+  "layout": {
+    "strategy": "Control Room Grid (3-column)",
+    "container": "w-full min-h-screen bg-zinc-950 p-4 md:p-6",
+    "grid": "grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6",
+    "columns": {
+      "left": "lg:col-span-3 flex flex-col gap-4",
+      "center": "lg:col-span-6 flex flex-col gap-4",
+      "right": "lg:col-span-3 flex flex-col gap-4"
+    }
+  },
+  "components": {
+    "cards": {
+      "style": "bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-sm",
+      "header": "px-4 py-3 border-b border-zinc-800 bg-zinc-900/80 flex justify-between items-center",
+      "body": "p-4"
+    },
+    "buttons": {
+      "primary": "bg-amber-500 text-zinc-950 hover:bg-amber-400 font-semibold rounded-md px-4 py-2 transition-colors",
+      "buy": "bg-emerald-500 text-white hover:bg-emerald-400 font-bold rounded-md px-4 py-2",
+      "sell": "bg-rose-500 text-white hover:bg-rose-400 font-bold rounded-md px-4 py-2"
+    },
+    "data_displays": {
+      "live_ticker": "Flex container with large JetBrains Mono text, color-coded based on live tick direction, flashing animation on update.",
+      "gauge_chart": "Use Recharts PieChart (half donut) for Toros vs Osos.",
+      "progress_bars": "Thin (h-2), rounded-full.",
+      "timeframe_badges": "Small rounded px-2 py-1 text-xs font-mono font-bold"
+    }
+  },
+  "animations": {
+    "price_tick_up": "animate-pulse bg-emerald-500/20 text-emerald-500",
+    "price_tick_down": "animate-pulse bg-rose-500/20 text-rose-500",
+    "card_hover": "transition-all duration-200 hover:border-zinc-700"
+  },
+  "icons": {
+    "library": "lucide-react"
+  },
+  "specific_sections": {
+    "header": "Logo XAU/USD Señales, Source Selector (OANDA/Gold-API), Live Server Time, Ping.",
+    "left_column": [
+      "Sesiones de Mercado (Sidney, Tokyo, London, NY) with active/inactive dot indicator.",
+      "Indicadores de Fuerza (Tendencia, Momentum, Volatilidad, Volumen, Confianza) via progress bars.",
+      "Estadísticas del Sistema (Efectividad %, Total Señales, Activas)."
+    ],
+    "center_column": [
+      "Main Price Header (Live XAU/USD, spread, volatilidad, high/low).",
+      "Active Signal Card (COMPRA/VENTA huge badge, Confianza %, Entrada, TP1, TP2, TP3, SL).",
+      "Toros vs Osos Gauge (Recharts).",
+      "Predicción Próxima Vela (1M/5M CALL/PUT binary options)."
+    ],
+    "right_column": [
+      "Análisis Multi-Temporal (1M, 5M, 15M, 30M, 1H, 4H, 1D trend badges).",
+      "Historial de Señales (Recent signals list, outcome Ganada/Perdida, Pips)."
+    ]
+  },
+  "accessibility_and_testing": {
+    "contrast": "Ensure all text passes APCA contrast.",
+    "test_ids": [
+      "data-testid='live-price-ticker'",
+      "data-testid='active-signal-card'",
+      "data-testid='signal-buy-badge'",
+      "data-testid='signal-sell-badge'",
+      "data-testid='multi-timeframe-panel'",
+      "data-testid='market-sessions-panel'",
+      "data-testid='signal-history-list'"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Build the dashboard in React/Tailwind.",
+    "IMPORTANT: Use .jsx or .js extensions for components, not .tsx.",
+    "Apply JetBrains Mono to all numeric prices and percentages.",
+    "Apply Manrope to headings and standard labels.",
+    "The entire UI MUST be in Spanish.",
+    "Avoid standard Shadcn Cards; build custom div structures for the dense Control Room bento layout to have maximum padding/spacing control.",
+    "Ensure the color palette relies strictly on the provided Emerald (Buy) and Rose (Sell) shades alongside deep Zinc blacks.",
+    "Include all data-testid attributes across interactive UI elements."
+  ],
+  "image_urls": []
+}
