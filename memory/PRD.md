@@ -25,7 +25,7 @@
 - `GET /stats` — active count, win rate, avg confidence
 
 ## Implemented (2026-02-05)
-- Live price ticker with tick-up/tick-down animations
+- Live price ticker with tick-up/tick-down animations + freshness indicator
 - Bulls&Bears half-donut gauge (Recharts)
 - Active signal card (BUY/SELL with confidence, entry, TP1/TP2/TP3, SL, P&L live)
 - Multi-timeframe panel (7 TFs with directional badges, click to switch)
@@ -37,6 +37,17 @@
 - Source selector (TradingView OANDA / Gold-API toggle)
 - Spanish UI throughout
 - All `data-testid` attributes for testing
+
+## Implemented (Iteration 2 - 2026-02-05)
+- **Real-time data 100%**: Eliminated Yahoo Finance / `GC=F` (descuadraba con MT4). All indicators (RSI/MACD/CCI/BB/Mom/ATR) now come from TradingView Technical Analysis API on OANDA:XAUUSD spot — same feed as displayed price → matches Exness/XM/IC Markets MT4 perfectly.
+- **Tick freshness**: backend ring-buffer of last 600 ticks; `fresh_seconds` field shows seconds since real price change. Frontend price polling 2s.
+- **Dynamic recommendations** (`/api/recommendation`): 6 actions — TOMAR, ESPERAR, MANTENER, TOMAR_GANANCIAS (TP1/2/3), CERRAR_REVERSO (sudden adverse move > ATR/30 in 45s window), STOP_LOSS_HIT.
+- **RecommendationBanner**: prominent banner above active signal with urgency indicator and tone-coded styling.
+- **Voice alerts** (Web Speech API, no API keys, no costs):
+  - Toggle ON/OFF, voice selector (lists all browser voices, prefers Spanish), rate slider, volume slider, test button.
+  - Alert types: nueva señal, TOMAR AHORA, TP alcanzado, Stop Loss, reverso, esperar (cada uno on/off).
+  - Settings persisted to localStorage.
+  - Auto-triggers when signal.id changes or recommendation.label changes.
 
 ## Backlog (P1)
 - Persistir historial en MongoDB (toggle opcional para análisis histórico)
