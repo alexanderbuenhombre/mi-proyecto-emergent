@@ -1,0 +1,33 @@
+{
+  "summary": "Iter5 full e2e validation (backend + frontend). Backend tests confirm Signal now has tp_hits (dict tp1/tp2/tp3:bool), sl_hit (bool) and max_favorable (float|null). Sticky behaviour verified across 3s-apart polls: MFE monotonic in signal direction, tp_hits never un-stick, sl_hit never un-stick, and tp_hits are consistent with MFE. Recommendation payload still exposes label/headline/take/take_label/take_reason/probability for inline rendering. Frontend Dashboard renders ActiveSignalCard with EVERYTHING inline (no separate recommendation-banner). Inline rec, take-recommendation/take-label/take-reason, tp-1..3, stop-loss-box and voice-quick-toggle all present inside active-signal-card. No JS errors on load. Legacy RecommendationBanner.jsx file still exists in src but is no longer imported/used by Dashboard (dead code).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5.py",
+    "/app/test_reports/pytest/iteration5_results.xml"
+  ],
+  "action_items": [
+    "Optional cleanup: delete unused /app/frontend/src/components/dashboard/RecommendationBanner.jsx since it is no longer imported anywhere (dead code left over from previous iteration).",
+    "Optional: Older test files (/app/backend/tests/backend_test.py, test_iteration3.py, test_iteration4.py) read REACT_APP_BACKEND_URL at import time without load_dotenv — they fail collection unless env var is exported. test_iteration5.py already loads frontend/.env via python-dotenv. Consider adding a conftest.py that loads the .env file once for all tests."
+  ],
+  "critical_code_review_comments": [
+    "Sticky logic in api_active_signal correctly uses max_favorable (MFE) instead of current price so tp_hits remain True after retracement — matches spec.",
+    "max_favorable initializes to entry on first poll (prev_mfe = cur.get('max_favorable') or entry) which is correct since entry is the first 'favorable' reference point. Note: the field is not set inside _make_signal itself, so the raw /signal/active first response after a fresh signal returns max_favorable = price.price (after max/min with entry), which is fine.",
+    "sl_hit uses price.price (current price), not MFE/worst excursion — this is correct because SL is a hard trigger and can only be hit by actual adverse price, not by reverse-excursion tracking.",
+    "Frontend ActiveSignalCard renders TP badge with emerald colors even for SELL signals (the hit/ALCANZADO badge background is hardcoded bg-emerald-500/40 in both BUY and SELL variants). Minor visual inconsistency — for SELL signals the reached-TP badge still appears green. Low priority.",
+    "RecommendationBanner.jsx file is orphaned (no imports) but still has data-testid='recommendation-banner'. Deletion recommended to avoid future confusion."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration5.py"
+  ],
+  "success_rate": {"backend": "100% (4/4)", "frontend": "100% (all 11 assertions passed)"},
+  "test_credentials": "N/A (no auth)",
+  "seed_data_creation": "None. Tests rely on live TradingView data; a real BUY signal on 5m was active during testing (price 4608, confidence 52%, MEDIA prob).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend API /api/signal/active returns signal with tp_hits/sl_hit/max_favorable. Frontend ActiveSignalCard consolidates ALL info inline (no external banner). RecommendationBanner.jsx is dead code — safe to delete. Live 5m signal was BUY with tp_hits all False and MFE near entry during this run — reached-state ALCANZADO badge not visible but selectors tp-1/tp-2/tp-3 and stop-loss-box all render. If retesting with reached TPs, verify the absolute top-right ALCANZADO badge (CheckCircle2 + 'ALCANZADO' text) renders inside the hit TpBox."
+}

@@ -18,12 +18,20 @@ import SystemStats from "../components/dashboard/SystemStats";
 import SourceSelector from "../components/dashboard/SourceSelector";
 import ConfluencePanel from "../components/dashboard/ConfluencePanel";
 import VoiceSettings from "../components/dashboard/VoiceSettings";
-import RecommendationBanner from "../components/dashboard/RecommendationBanner";
+import { saveVoiceSettings } from "../lib/voice";
 
 export default function Dashboard() {
   const [source, setSource] = useState("tradingview");
   const [tf, setTf] = useState("5m");
   const [voiceSettings, setVoiceSettings] = useState(() => loadVoiceSettings());
+
+  const toggleVoice = () => {
+    setVoiceSettings((s) => {
+      const next = { ...s, enabled: !s.enabled };
+      saveVoiceSettings(next);
+      return next;
+    });
+  };
 
   const price = usePolling(() => fetchPrice(source), 2000, [source]);
   const sessions = usePolling(fetchSessions, 30000);
@@ -50,8 +58,6 @@ export default function Dashboard() {
       <div className="max-w-[1600px] mx-auto space-y-4">
         <PriceHeader price={price.data} sessions={sessions.data} />
 
-        {recommendation && <RecommendationBanner rec={recommendation} />}
-
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
           {/* LEFT */}
           <div className="lg:col-span-3 flex flex-col gap-4">
@@ -64,7 +70,12 @@ export default function Dashboard() {
 
           {/* CENTER */}
           <div className="lg:col-span-6 flex flex-col gap-4">
-            <ActiveSignalCard payload={activeSig.data} timeframe={tf} />
+            <ActiveSignalCard
+              payload={activeSig.data}
+              timeframe={tf}
+              voiceEnabled={voiceSettings.enabled}
+              onToggleVoice={toggleVoice}
+            />
             <SignalHistory data={history.data} />
           </div>
 

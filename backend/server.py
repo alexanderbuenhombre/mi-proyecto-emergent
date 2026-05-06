@@ -14,7 +14,7 @@ import asyncio
 import logging
 from collections import deque
 from pathlib import Path
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Literal, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -83,6 +83,9 @@ class Signal(BaseModel):
     expires_at: str
     status: Literal["active", "won", "lost", "expired"] = "active"
     pnl_pct: Optional[float] = None
+    tp_hits: Dict[str, bool] = Field(default_factory=lambda: {"tp1": False, "tp2": False, "tp3": False})
+    sl_hit: bool = False
+    max_favorable: Optional[float] = None  # best price reached in signal direction
 
 
 # ---------------- Price fetchers ----------------
@@ -656,8 +659,34 @@ async def api_active_signal(timeframe: str = Query("5m")):
     cur = STATE["active_signals"].get(timeframe)
     if cur and datetime.fromisoformat(cur["expires_at"]) > now:
         entry = cur["entry"]
-        pnl = ((price.price - entry) / entry) * 100 if cur["direction"] == "BUY" else ((entry - price.price) / entry) * 100
+        is_buy = cur["direction"] == "BUY"
+        pnl = ((price.price - entry) / entry) * 100 if is_buy else ((entry - price.price) / entry) * 100
         cur["pnl_pct"] = round(pnl, 3)
+
+        # Update max favorable excursion (best price reached in signal direction)
+        prev_mfe = cur.get("max_favorable") or entry
+        if is_buy:
+            cur["max_favorable"] = max(prev_mfe, price.price)
+        else:
+            cur["max_favorable"] = min(prev_mfe, price.price)
+
+        # Sticky TP hits: once True stays True. Use max_favorable to detect "alcanzado".
+        mfe = cur["max_favorable"]
+        hits = cur.get("tp_hits") or {"tp1": False, "tp2": False, "tp3": False}
+        for k in ("tp1", "tp2", "tp3"):
+            if hits.get(k):
+                continue
+            tp_val = cur[k]
+            reached = (is_buy and mfe >= tp_val) or (not is_buy and mfe <= tp_val)
+            if reached:
+                hits[k] = True
+        cur["tp_hits"] = hits
+
+        # Sticky SL hit
+        if not cur.get("sl_hit"):
+            sl = cur["stop_loss"]
+            cur["sl_hit"] = (is_buy and price.price <= sl) or (not is_buy and price.price >= sl)
+
         recommendation = compute_recommendation(cur, price.price, analysis, probability)
         return {"signal": cur, "analysis": analysis, "price": price.model_dump(),
                 "recommendation": recommendation, "confluence": confluence, "probability": probability}
