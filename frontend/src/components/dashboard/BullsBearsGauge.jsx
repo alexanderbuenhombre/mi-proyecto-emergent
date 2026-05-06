@@ -21,7 +21,8 @@ export default function BullsBearsGauge({ analysis, timeframe = "5m" }) {
   const amplified = Math.sign(score) * Math.min(100, Math.pow(Math.abs(score) / 100, 0.7) * 100);
   const norm = Math.max(0, Math.min(1, (amplified + 100) / 200));
   const angle = 180 - norm * 180;
-  const targetRotation = angle - 90;
+  // CSS rotate is clockwise; needle starts pointing UP. Positive rotation tilts right (towards COMPRA = green).
+  const targetRotation = 90 - angle;
 
   // Glow intensity scales with score magnitude
   const glowColor = score >= 25 ? "rgba(16,185,129,0.55)" : score <= -25 ? "rgba(244,63,94,0.55)" : "rgba(161,161,170,0.25)";
