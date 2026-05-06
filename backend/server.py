@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # ---------------- In-memory state ----------------
 STATE: Dict[str, Any] = {
     "history": [],
-    "active_signal": None,
+    "active_signals": {},     # keyed by timeframe - prevents overwrite when user switches TFs
+    "signal_cooldown": {},    # tf -> unix_ts: earliest time we can re-emit for this TF
     "last_price": None,
     "last_price_at": None,
     "last_price_change_at": None,  # last time the price actually changed
@@ -587,11 +588,12 @@ def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float,
     direction = analysis["direction"]
     if direction == "NEUTRAL":
         return None
-    # STRICT: only emit signals when probability is ALTA or ULTRA (high probability filter)
-    if probability["label"] not in ("ALTA", "ULTRA"):
+    # Allow signals to appear even at MEDIA probability (UI shows NO RECOMENDABLE clearly).
+    # Only suppress at BAJA where indicators are too weak/contradictory.
+    if probability["label"] == "BAJA":
         return None
-    # Confluence direction must match analysis direction
-    if confluence["direction"] != direction:
+    # Confluence direction must not directly contradict (allow NEUTRAL confluence)
+    if confluence["direction"] not in (direction, "NEUTRAL"):
         return None
     a = max(analysis["atr"], 0.5)
     # Scale ATR per timeframe - higher TF = larger ATR-based stops
@@ -649,23 +651,40 @@ async def api_active_signal(timeframe: str = Query("5m")):
     sess_label = await _session_label()
     probability = compute_probability(analysis, confluence, sess_label)
 
-    cur = STATE.get("active_signal")
-    if cur and cur["timeframe"] == timeframe:
-        if datetime.fromisoformat(cur["expires_at"]) > datetime.now(timezone.utc):
-            entry = cur["entry"]
-            pnl = ((price.price - entry) / entry) * 100 if cur["direction"] == "BUY" else ((entry - price.price) / entry) * 100
-            cur["pnl_pct"] = round(pnl, 3)
-            recommendation = compute_recommendation(cur, price.price, analysis, probability)
-            return {"signal": cur, "analysis": analysis, "price": price.model_dump(),
-                    "recommendation": recommendation, "confluence": confluence, "probability": probability}
+    now = datetime.now(timezone.utc)
+    # Per-TF active signal (prevents overwrite when user switches timeframes)
+    cur = STATE["active_signals"].get(timeframe)
+    if cur and datetime.fromisoformat(cur["expires_at"]) > now:
+        entry = cur["entry"]
+        pnl = ((price.price - entry) / entry) * 100 if cur["direction"] == "BUY" else ((entry - price.price) / entry) * 100
+        cur["pnl_pct"] = round(pnl, 3)
+        recommendation = compute_recommendation(cur, price.price, analysis, probability)
+        return {"signal": cur, "analysis": analysis, "price": price.model_dump(),
+                "recommendation": recommendation, "confluence": confluence, "probability": probability}
+
+    # Expired? Remove it.
+    if cur:
+        STATE["active_signals"].pop(timeframe, None)
+
+    # Cooldown: after a signal for this TF completes, wait before generating another
+    cooldown_until = STATE["signal_cooldown"].get(timeframe, 0)
+    if time.time() < cooldown_until:
+        recommendation = compute_recommendation(None, price.price, analysis, probability)
+        return {"signal": None, "analysis": analysis, "price": price.model_dump(),
+                "recommendation": recommendation, "confluence": confluence, "probability": probability}
 
     new_sig = _make_signal(analysis, timeframe, price.price, confluence, probability)
     if new_sig:
-        STATE["active_signal"] = new_sig.model_dump()
-        STATE["history"].insert(0, STATE["active_signal"])
+        sig_dict = new_sig.model_dump()
+        STATE["active_signals"][timeframe] = sig_dict
+        STATE["history"].insert(0, sig_dict)
         STATE["history"] = STATE["history"][:50]
         STATE["stats"]["total"] += 1
-    sig_obj = STATE.get("active_signal") if (new_sig and STATE["active_signal"]["id"] == new_sig.id) else None
+        # Set cooldown to 50% of expiration so we don't spam the same TF
+        expires_min = {"1m": 3, "5m": 15, "15m": 45, "30m": 90, "1h": 240, "4h": 960, "1d": 1440}.get(timeframe, 15)
+        STATE["signal_cooldown"][timeframe] = time.time() + (expires_min * 60 * 0.5)
+
+    sig_obj = STATE["active_signals"].get(timeframe)
     recommendation = compute_recommendation(sig_obj, price.price, analysis, probability)
     return {"signal": sig_obj, "analysis": analysis, "price": price.model_dump(),
             "recommendation": recommendation, "confluence": confluence, "probability": probability}
@@ -680,10 +699,10 @@ async def api_recommendation(timeframe: str = Query("5m")):
     confluence = compute_confluence(tv, price.price, timeframe)
     sess_label = await _session_label()
     probability = compute_probability(analysis, confluence, sess_label)
-    sig = STATE.get("active_signal")
-    if sig and sig["timeframe"] == timeframe:
-        if datetime.fromisoformat(sig["expires_at"]) <= datetime.now(timezone.utc):
-            sig = None
+    sig = STATE["active_signals"].get(timeframe)
+    if sig and datetime.fromisoformat(sig["expires_at"]) <= datetime.now(timezone.utc):
+        STATE["active_signals"].pop(timeframe, None)
+        sig = None
     rec = compute_recommendation(sig, price.price, analysis, probability)
     return {
         "recommendation": rec,

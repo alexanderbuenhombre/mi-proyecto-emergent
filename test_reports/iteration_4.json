@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 4 bug-fix validation COMPLETE. 33/33 pytest passing (14 regression + 9 iter3 + 10 new iter4). All 4 user-reported bugs verified fixed on live preview URL. Backend: /api/signal/active per-TF dict works - calling ?timeframe=5m twice returns same signal.id; switching TFs (1m->5m->15m->1m) does NOT destroy other TF's signal; signal.timeframe == requested tf for 1m/5m/15m/1h; cooldown (50% of expiration) active; MEDIA probability now generates signal (loosened filter), only BAJA + direct contradiction suppress. Frontend Playwright test performed rapid TF switching 5x - RESULT: 0 voice utterances spoken (voice loop bug FIXED), 0 console errors, BullsBearsGauge needle visibly rotated to -54.6deg with live score ~+67 (amplification Math.pow(|s|/100, 0.7)*100 + drop-shadow glow scaling working), ConfluencePanel rendered 5m/15m/1h per-TF aligned directions with Veredicto and updated on TF click, live 'COMPRA XAU/USD 64% ALTA PROB MEDIA' signal stable for 25 minutes (visible in screenshot).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_iteration3.py",
+    "/app/backend/tests/test_iteration4.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/iteration4_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "STATE is in-memory per worker: if backend runs multiple uvicorn workers, active_signals dict is NOT shared -> different clients could still observe signal regeneration. Current supervisor config uses single worker so OK for now. For horizontal scaling move STATE to Redis/MongoDB.",
+    "signal_cooldown uses time.time() unix timestamp while expires_at uses datetime.fromisoformat. Both correct but two time systems in same module; consider unifying on datetime UTC.",
+    "usePolling genRef is an integer that increments per effect-run, combined with cancelled flag - robust. However intervalMs captured in closure: if intervalMs prop changes without deps change, new value won't take effect. Minor.",
+    "useVoiceAlerts COOLDOWN_MS=8000 is module-level constant - good. The `isNewSignal` detection uses `lastKey.current?.split('|')[0]` which after initial mount is the current key, so first real signal after mount might be classified as 'not new'. Acceptable because initialized.current skip handles first render.",
+    "BullsBearsGauge bars are still pseudo-derived from score (iter3 comment), not from STATE['ticks']. Cosmetic only.",
+    "compute_probability: when probability is MEDIA the 'reason' text says 'espera mejor confirmacion' but _make_signal now emits at MEDIA - so UI will show a signal card plus a NO TOMAR strip. Message is clear to the user.",
+    "api_active_signal: persisted cur signal is returned with its original confluence/probability recomputed each call -- good; but STATE['stats']['total'] is ONLY incremented on NEW signal creation, not on retrieval. Correct."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4.py",
+    "/app/test_reports/iteration_4.json",
+    "/app/test_reports/pytest/iteration4_results.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "success_rate": {"backend": "100% (33/33)", "frontend": "100% (all 4 reported bugs fixed)"},
+  "test_credentials": "N/A - public endpoints, no auth",
+  "seed_data_creation": "None - live TradingView OANDA data",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter4 validated all 4 user-reported bugs fixed. Key files: backend/server.py STATE['active_signals'] is dict keyed by timeframe (line 34); STATE['signal_cooldown'] dict keyed by tf (line 35); api_active_signal reads cur=STATE['active_signals'].get(timeframe) (line 656) preserving other TFs; cooldown check at line 670; _make_signal allows MEDIA prob (line 593 only rejects BAJA). Frontend: usePolling.js uses genRef counter (line 13) + cancelled flag (line 19); useVoiceAlerts.js has COOLDOWN_MS=8000 + composite key + reset on tf change (lines 11-47); BullsBearsGauge uses Math.pow(|s|/100, 0.7)*100 amplification (line 21) + drop-shadow glow filter (line 111). All 10 new iter4 tests pass: test_same_tf_twice, test_switching_tfs_preserves, test_signal_timeframe_matches_request (1m/5m/15m/1h), test_signal_emitted_for_media_prob, test_signal_confluence_does_not_contradict, test_signal_stability_3_consecutive_calls, test_probability_media_is_acceptable. Regression 14 + iter3 9 all green.",
+  "rca of the issue": "Root causes (now fixed): (1) Previously STATE['active_signal'] was a single global field, so switching TFs overwrote the other TF's signal -> /api/signal/active always saw a stale signal for wrong TF and regenerated -> id kept changing -> useVoiceAlerts saw new id every cycle -> voice loop. Fix: dict keyed by tf. (2) Gauge needle used raw score/100 mapping so small |score|=25 only rotated ~22.5deg from center (barely visible). Fix: Math.pow(|s|/100, 0.7)*100 amplifies mid-range scores. (3) Strict filter (ALTA/ULTRA only) suppressed signal 90% of the time during normal market -> user saw 'no signal ever'. Fix: allow MEDIA too, reject only BAJA + direct confluence contradiction."
+}

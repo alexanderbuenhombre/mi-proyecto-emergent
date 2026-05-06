@@ -34,7 +34,7 @@ export default function Dashboard() {
   const binary = usePolling(fetchBinary, 4000);
   const stats = usePolling(fetchStats, 15000);
 
-  const tfAnalysis = multi.data?.timeframes?.[tf];
+  const tfAnalysis = activeSig.data?.analysis || multi.data?.timeframes?.[tf];
   const recommendation = activeSig.data?.recommendation;
   const confluence = activeSig.data?.confluence;
 
@@ -42,6 +42,7 @@ export default function Dashboard() {
     signal: activeSig.data?.signal,
     recommendation,
     settings: voiceSettings,
+    timeframe: tf,
   });
 
   return (

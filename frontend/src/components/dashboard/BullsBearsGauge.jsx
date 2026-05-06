@@ -16,10 +16,16 @@ export default function BullsBearsGauge({ analysis, timeframe = "5m" }) {
   const rsi = analysis?.rsi ?? 50;
   const cci = analysis?.cci ?? 0;
 
-  // map -100..100 -> 0..1 -> 180..0 deg (left=red, right=green)
-  const norm = Math.max(0, Math.min(1, (score + 100) / 200));
-  const angle = 180 - norm * 180; // pointer from -90 to +90 (left to right)
-  const targetRotation = angle - 90; // for CSS rotate at bottom origin
+  // Amplify score for visual responsiveness while keeping bounds.
+  // Scores ±25 already mean directional → push them visually further from center.
+  const amplified = Math.sign(score) * Math.min(100, Math.pow(Math.abs(score) / 100, 0.7) * 100);
+  const norm = Math.max(0, Math.min(1, (amplified + 100) / 200));
+  const angle = 180 - norm * 180;
+  const targetRotation = angle - 90;
+
+  // Glow intensity scales with score magnitude
+  const glowColor = score >= 25 ? "rgba(16,185,129,0.55)" : score <= -25 ? "rgba(244,63,94,0.55)" : "rgba(161,161,170,0.25)";
+  const glowSize = Math.min(18, 6 + Math.abs(score) / 8);
 
   // Label mapping
   let label = "Neutral";
@@ -43,7 +49,9 @@ export default function BullsBearsGauge({ analysis, timeframe = "5m" }) {
     });
   }
 
-  // Re-shuffle bars when score sign changes
+  // Re-shuffle bars when score sign or magnitude buckets change
+  const scoreSign = Math.sign(score);
+  const scoreBucket = Math.round(Math.abs(score) / 10);
   useEffect(() => {
     bars.current = Array.from({ length: 36 }, (_, i) => {
       const base = 12 + ((i * 9587 + Math.abs(score) * 13) % 30);
@@ -51,7 +59,8 @@ export default function BullsBearsGauge({ analysis, timeframe = "5m" }) {
       const sign = r === 0 ? "neutral" : score > 5 ? (r === 1 ? "down" : "up") : score < -5 ? (r === 1 ? "up" : "down") : (i % 2 === 0 ? "up" : "down");
       return { h: base, sign };
     });
-  }, [Math.sign(score), Math.round(Math.abs(score) / 10)]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scoreSign, scoreBucket]);
 
   return (
     <div className="card" data-testid="bulls-bears-gauge">
@@ -93,12 +102,13 @@ export default function BullsBearsGauge({ analysis, timeframe = "5m" }) {
               x1="100" y1="96"
               x2="100" y2="34"
               stroke="#fafafa"
-              strokeWidth="2.4"
+              strokeWidth="2.6"
               strokeLinecap="round"
               style={{
                 transformOrigin: "100px 96px",
                 transform: `rotate(${targetRotation}deg)`,
                 transition: "transform 900ms cubic-bezier(.2,.8,.2,1)",
+                filter: `drop-shadow(0 0 ${glowSize}px ${glowColor})`,
               }}
             />
           </svg>
