@@ -19,9 +19,23 @@ from typing import List, Optional, Literal, Dict, Any
 import uuid
 from datetime import datetime, timezone, timedelta
 import httpx
+from motor.motor_asyncio import AsyncIOMotorClient
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+# ---------------- MongoDB (optional persistence) ----------------
+MONGO_URL = os.environ.get('MONGO_URL')
+DB_NAME = os.environ.get('DB_NAME', 'xauusd_signals')
+_mongo_client: Optional[AsyncIOMotorClient] = None
+_db = None
+if MONGO_URL:
+    try:
+        _mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=2000)
+        _db = _mongo_client[DB_NAME]
+    except Exception as e:
+        logging.warning(f"Mongo init failed: {e}")
+        _db = None
 
 app = FastAPI(title="XAUUSD Signals API")
 api_router = APIRouter(prefix="/api")
@@ -173,14 +187,14 @@ async def get_price(source: str = "tradingview") -> PriceData:
 
 # ---------------- TradingView Technical Analysis ----------------
 def _build_tv_fields() -> str:
-    base = ["close", "change", "high", "low", "volume", "ATR"]
+    base = ["close", "change", "high", "low", "volume"]
+    # Indicators that we want per-timeframe (incl. ATR for precise SL/TP per TF)
     per_tf = ["RSI", "MACD.macd", "MACD.signal", "CCI20", "Mom",
               "Recommend.All", "Recommend.MA", "Recommend.Other",
-              "BB.upper", "BB.lower"]
+              "BB.upper", "BB.lower", "ATR"]
     fields = list(base)
-    # default TF is no suffix; add suffixes for the rest
     for ind in per_tf:
-        fields.append(ind)  # default (1d-ish, depends on TV)
+        fields.append(ind)  # default
         for tf_label, tf_code in TV_TIMEFRAMES.items():
             fields.append(f"{ind}|{tf_code}")
     return ",".join(fields)
@@ -238,7 +252,8 @@ def analyze_timeframe_tv(tv: Dict[str, Any], timeframe: str, current_price: floa
     bb_up = _get_tv(tv, "BB.upper", tf_code, current_price)
     bb_lo = _get_tv(tv, "BB.lower", tf_code, current_price)
     rec_all = _get_tv(tv, "Recommend.All", tf_code, 0)  # -1..+1
-    atr_v = _get_tv(tv, "ATR", None, max(current_price * 0.0008, 0.5))
+    # ATR per-TF (falls back to default ATR if not provided by TV for that code)
+    atr_v = _get_tv(tv, "ATR", tf_code, _get_tv(tv, "ATR", None, max(current_price * 0.0008, 0.5)))
 
     # BB position
     bb_pos = 0.5
