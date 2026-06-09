@@ -16,9 +16,10 @@ function minutesLeft(iso) {
   return Math.max(0, Math.round(ms / 60000));
 }
 
-export default function ActiveSignalCard({ payload, timeframe, voiceEnabled, onToggleVoice }) {
+export default function ActiveSignalCard({ payload, timeframe, voiceEnabled, onToggleVoice, livePrice }) {
   const signal = payload?.signal;
-  const price = payload?.price;
+  // Prefer the LIVE price feed (1s/2s polling) over the signal poll price (3s)
+  const price = livePrice != null ? { price: livePrice, ...(payload?.price || {}) } : payload?.price;
   const recommendation = payload?.recommendation;
 
   // Empty state — embed recommendation inside same shell
@@ -69,7 +70,11 @@ export default function ActiveSignalCard({ payload, timeframe, voiceEnabled, onT
 
   const isBuy = signal.direction === "BUY";
   const Icon = isBuy ? TrendingUp : TrendingDown;
-  const livePnl = signal.pnl_pct ?? 0;
+  // Recalculate live P&L on every render from the latest live price
+  const currentPrice = price?.price ?? signal.entry;
+  const livePnl = signal.entry
+    ? ((isBuy ? (currentPrice - signal.entry) : (signal.entry - currentPrice)) / signal.entry) * 100
+    : (signal.pnl_pct ?? 0);
   const tpHits = signal.tp_hits || { tp1: false, tp2: false, tp3: false };
   const slHit = !!signal.sl_hit;
   const minLeft = minutesLeft(signal.expires_at);

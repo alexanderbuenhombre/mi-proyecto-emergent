@@ -136,6 +136,45 @@ async def fetch_tradingview_oanda() -> Optional[PriceData]:
         return None
 
 
+async def fetch_swissquote() -> Optional[PriceData]:
+    """Swissquote public Live Tick — bank-grade bid/ask, sub-second updates."""
+    url = "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
+    try:
+        async with httpx.AsyncClient(timeout=6.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, list) or not data:
+                return None
+            # Use 'elite' profile (tightest spread, closest to true mid)
+            spreads = data[0].get("spreadProfilePrices", [])
+            elite = next((s for s in spreads if s.get("spreadProfile") == "elite"), spreads[0] if spreads else None)
+            if not elite:
+                return None
+            bid = float(elite["bid"])
+            ask = float(elite["ask"])
+            mid = round((bid + ask) / 2, 2)
+            spread = round(ask - bid, 3)
+            ts_ms = data[0].get("ts") or int(time.time() * 1000)
+            iso_ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+            prev = STATE.get("last_price") or mid
+            change = round(mid - prev, 2)
+            change_pct = round((change / prev) * 100, 3) if prev else 0.0
+            return PriceData(
+                price=mid,
+                change=change,
+                change_pct=change_pct,
+                spread=spread,
+                source="Swissquote (Live Tick)",
+                timestamp=iso_ts,
+                high=ask,
+                low=bid,
+            )
+    except Exception as e:
+        logger.warning(f"Swissquote fetch failed: {e}")
+        return None
+
+
 async def fetch_gold_api() -> Optional[PriceData]:
     url = "https://api.gold-api.com/price/XAU"
     try:
@@ -163,10 +202,12 @@ async def fetch_gold_api() -> Optional[PriceData]:
 
 
 async def get_price(source: str = "tradingview") -> PriceData:
-    if source == "goldapi":
-        p = await fetch_gold_api() or await fetch_tradingview_oanda()
+    if source == "swissquote":
+        p = await fetch_swissquote() or await fetch_tradingview_oanda() or await fetch_gold_api()
+    elif source == "goldapi":
+        p = await fetch_gold_api() or await fetch_tradingview_oanda() or await fetch_swissquote()
     else:
-        p = await fetch_tradingview_oanda() or await fetch_gold_api()
+        p = await fetch_tradingview_oanda() or await fetch_swissquote() or await fetch_gold_api()
     if p is None:
         last = STATE.get("last_price") or 2650.0
         p = PriceData(
@@ -203,7 +244,8 @@ def _build_tv_fields() -> str:
 async def fetch_tv_analysis() -> Dict[str, Any]:
     cache = STATE["ta_cache"]
     now = time.time()
-    if cache["data"] and now - cache["ts"] < 8:
+    # Cache 3s — keeps signals fresh enough for scalping while protecting from rate-limit
+    if cache["data"] and now - cache["ts"] < 3:
         return cache["data"]
     url = "https://scanner.tradingview.com/symbol"
     params = {
@@ -481,8 +523,9 @@ def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analy
         }
 
     # If signal is fresh and price near entry → check probability before saying TOMAR
-    near_entry = abs(price - entry) / entry <= 0.0015  # within 0.15%
-    if near_entry and signal["confidence"] >= 70:
+    # Widened window from 0.15% to 0.30% so user gets MORE TIME to enter the trade
+    near_entry = abs(price - entry) / entry <= 0.0030
+    if near_entry and signal["confidence"] >= 60:
         if take_flag:
             return {**common,
                 "action": "TOMAR",
@@ -502,9 +545,9 @@ def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analy
                 "tone": "neutral",
             }
 
-    # Price drifted from entry
+    # Price drifted from entry (was 0.3% - relaxed to 0.5% so signal stays "viable" longer)
     drift_pct = abs(price - entry) / entry * 100
-    if drift_pct > 0.3:
+    if drift_pct > 0.5:
         return {**common,
             "action": "ESPERAR",
             "label": "ESPERAR",
@@ -532,7 +575,7 @@ async def root():
 
 
 @api_router.get("/price")
-async def api_price(source: str = Query("tradingview", pattern="^(tradingview|goldapi)$")):
+async def api_price(source: str = Query("tradingview", pattern="^(tradingview|swissquote|goldapi)$")):
     p = await get_price(source)
     return p.model_dump()
 
