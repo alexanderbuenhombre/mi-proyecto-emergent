@@ -38,7 +38,7 @@ export default function ConfluencePanel({ data }) {
         </div>
         <div className="text-[11px] text-zinc-500 mt-2 text-center">
           {strong
-            ? "Confluencia fuerte · alta probabilidad"
+            ? "Confluencia fuerte · TFs alineados"
             : aligned_count >= 2
               ? "Confluencia moderada · espera confirmación"
               : "Sin confluencia · NO operes"}

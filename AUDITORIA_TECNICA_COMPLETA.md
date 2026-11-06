@@ -39,10 +39,10 @@
 |---|---|
 | **Stack** | FastAPI (Python 3.11) + React 19 (CRA + Tailwind 3 + Recharts) |
 | **Persistencia** | In-memory (dict + deque). MongoDB disponible pero no usado en lógica principal. |
-| **Fuente de datos** | TradingView público (`scanner.tradingview.com`) + Gold-API.com como fallback |
+| **Fuente de datos** | **Swissquote (Live Tick)** [default] + TradingView + Gold-API.com como fallbacks |
 | **Estrategia** | Confluencia multi-timeframe sobre indicadores TradingView pre-calculados |
 | **Indicadores** | Recommend.All, RSI(14), MACD(12/26/9), CCI(20), Momentum(10), Bollinger(20,2σ), ATR(14) |
-| **Comunicación real-time** | Polling HTTP (no WebSockets) — 2s para precio, 6s para señal |
+| **Comunicación real-time** | Polling HTTP (no WebSockets) — **1s con Swissquote / 2s otras fuentes** para precio, **3s para señal** |
 | **IA / ML** | **NINGUNA**. Es lógica determinista basada en reglas matemáticas. |
 | **Alertas** | Web Speech API del navegador (gratis) |
 | **Autenticación** | Ninguna (público) |
@@ -109,12 +109,19 @@
                   │                                  │
                   ▼                                  ▼
    ┌─────────────────────────────┐   ┌─────────────────────────────┐
-   │  TradingView Scanner API    │   │      Gold-API.com           │
-   │  scanner.tradingview.com    │   │      api.gold-api.com       │
-   │  → Spot OANDA               │   │      → Spot LBMA            │
-   │  → 26+ indicadores per-TF   │   │      → Fallback únicamente  │
-   │  → Sin credenciales         │   │      → Sin credenciales     │
+   │  Swissquote Live Tick       │   │  TradingView Scanner API    │
+   │  forex-data-feed.swiss...   │   │  scanner.tradingview.com    │
+   │  → bid/ask bancario         │   │  → Spot OANDA               │
+   │  → sub-segundo · elite      │   │  → 26+ indicadores per-TF   │
+   │  → Sin credenciales         │   │  → Sin credenciales         │
    └─────────────────────────────┘   └─────────────────────────────┘
+                                                  │
+                                                  ▼
+                                    ┌─────────────────────────────┐
+                                    │      Gold-API.com           │
+                                    │      api.gold-api.com       │
+                                    │      → Spot LBMA fallback   │
+                                    └─────────────────────────────┘
 ```
 
 ---
@@ -297,6 +304,21 @@ else: direction = "NEUTRAL"
 
 **El score puede sumar máximo +118 antes del clamp** (100 de Recommend + 8 RSI + 5 MACD + 5 CCI). El clamp limita a ±100.
 
+### 5.x Filtro de ALTA PROBABILIDAD (actualización junio 2026)
+
+Solo se emiten señales con probabilidad **ALTA (≥65% y ≥2 TFs alineados)** o **ULTRA (≥80% y 3/3 TFs)**:
+
+```python
+HIGH_PROB_LABELS = ("ALTA", "ULTRA"); HIGH_PROB_MIN = 65; BINARY_HIGH_PROB_MIN = 75
+# _make_signal: rechaza si label ∉ {ALTA, ULTRA} o si confluence.direction != direction
+```
+
+- **Señal activa**: MEDIA/BAJA ya no generan señal ni historial ni voz. La tarjeta muestra "Esperando señal de alta probabilidad" con barra de probabilidad actual vs mínimo (campos `probability_percent`, `min_required` en `recommendation`).
+- **/api/multi-timeframe**: cada TF incluye `probability`, `probability_percent`, `high_prob`. La UI solo muestra flecha alcista/bajista si `high_prob`; si no, "ESPERAR".
+- **/api/binary/next-candle**: `direction` = CALL/PUT solo si confianza ≥75% y la temporalidad superior (1m→5m, 5m→15m) coincide; si no, `ESPERAR`. Se añade `raw_direction` y `high_prob`.
+- Una señal ya emitida se sigue gestionando en vivo (TP/SL, reverso); si la probabilidad cae después, la recomendación pasa a "NO TOMAR" para quien aún no entró.
+
+
 ---
 
 ## 6. INDICADORES TÉCNICOS Y FÓRMULAS
@@ -409,9 +431,9 @@ risk_pct = |entry - stop_loss| / entry × 100
 ### 8.1 Precio
 
 - **Polling HTTP**, no WebSocket
-- Backend: `httpx.AsyncClient(timeout=8.0)` por request
-- Cache TA: 8s (`STATE["ta_cache"]`)
-- Frontend: `/api/price` cada **2 segundos**
+- Backend: `httpx.AsyncClient(timeout=6-8s)` por request
+- Cache TA: **3s** (`STATE["ta_cache"]`) — reducido de 8s para señales más rápidas
+- Frontend: `/api/price` cada **1 segundo con Swissquote** / **2 segundos con TradingView/Gold-API**
 
 ### 8.2 Tick Buffer
 
@@ -564,20 +586,29 @@ class Signal(BaseModel):
     max_favorable: Optional[float] = None   # MFE
 ```
 
-### 9.4 Data fetchers (líneas 91-171)
+### 9.4 Data fetchers (líneas 91-205)
+
+**Swissquote Live Tick** (`fetch_swissquote`, ~138-175):
+- GET a `forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD`
+- Devuelve lista con `spreadProfilePrices` (prime, elite, standard, retail, etc.)
+- Selecciona perfil `elite` (spread bancario más ajustado)
+- `mid = (bid + ask) / 2`
+- Sub-segundo (updates cada ~500ms típicamente)
 
 `fetch_tradingview_oanda()`: GET a scanner.tradingview.com, parsea close/bid/ask, retorna PriceData o None.
 
 `fetch_gold_api()`: GET a api.gold-api.com/price/XAU, retorna PriceData o None.
 
-`get_price(source)`: lógica de fallback + actualiza tick buffer + freshness:
+`get_price(source)`: lógica de fallback con 3 fuentes + actualiza tick buffer + freshness:
 
 ```python
 async def get_price(source="tradingview"):
-    if source == "goldapi":
-        p = await fetch_gold_api() or await fetch_tradingview_oanda()
+    if source == "swissquote":
+        p = await fetch_swissquote() or await fetch_tradingview_oanda() or await fetch_gold_api()
+    elif source == "goldapi":
+        p = await fetch_gold_api() or await fetch_tradingview_oanda() or await fetch_swissquote()
     else:
-        p = await fetch_tradingview_oanda() or await fetch_gold_api()
+        p = await fetch_tradingview_oanda() or await fetch_swissquote() or await fetch_gold_api()
 
     if p is None:
         p = PriceData(price=STATE["last_price"] or 2650, ...)
@@ -954,7 +985,7 @@ Contiene TODO inline (después de iteración 5):
 | Método | Ruta | Parámetros | Descripción |
 |---|---|---|---|
 | GET | `/api/` | — | Health |
-| GET | `/api/price` | `source=tradingview\|goldapi` | Precio spot + freshness |
+| GET | `/api/price` | `source=tradingview\|swissquote\|goldapi` | Precio spot + freshness |
 | GET | `/api/sessions` | — | 4 sesiones + label compuesto |
 | GET | `/api/multi-timeframe` | — | Análisis para los 7 TFs |
 | GET | `/api/strength` | — | Barras de fuerza (5 métricas) |
@@ -1223,8 +1254,8 @@ TAREA:
 | httpx async | axios, fetch, requests |
 | Pydantic | Zod, Joi, Yup, dataclasses |
 | MongoDB (Motor) | PostgreSQL, SQLite, Firebase |
-| TradingView scanner | TwelveData, Polygon, Alpha Vantage |
-| Gold-API.com | metals-api.com, goldprice.org |
+| TradingView scanner | Swissquote (mejor - sub-segundo), TwelveData, Polygon, Alpha Vantage |
+| Gold-API.com | metals-api.com, goldprice.org, Swissquote |
 | React 19 | Vue 3, Svelte, Next.js, vanilla JS |
 | Recharts (no usado en gauge) | Chart.js, ApexCharts, D3 |
 | Web Speech API | Sigue funcionando en cualquier navegador |
@@ -1395,13 +1426,13 @@ cada vez que /api/signal/active es llamado con timeframe = TF:
     si BUY y delta < -threshold: return CERRAR_REVERSO (urgent, danger)
     si SELL y delta > threshold: return CERRAR_REVERSO (urgent, danger)
 
-    # Regla 6: cerca de entrada
-    si |price-entry|/entry <= 0.0015 y confidence >= 70:
+    # Regla 6: cerca de entrada (ventana amplia — anticipación al trader)
+    si |price - entry|/entry <= 0.0030 y confidence >= 60:
         si take_flag: return TOMAR_AHORA (urgent, buy/sell)
         sino:         return NO_TOMAR (medium, neutral)
 
-    # Regla 7: precio se alejó
-    si |price-entry|/entry * 100 > 0.3:
+    # Regla 7: precio se alejó (drift > 0.5% - se relajó de 0.3% para dar más tiempo)
+    si |price-entry|/entry * 100 > 0.5:
         return ESPERAR "precio se alejó" (low, neutral)
 
     # Regla 8: default
@@ -1409,11 +1440,12 @@ cada vez que /api/signal/active es llamado con timeframe = TF:
 
 
 # === FRONTEND: BUCLE DE POLLING ===
-cada 2 segundos: GET /api/price
-cada 4 segundos: GET /api/binary/next-candle
-cada 6 segundos: GET /api/signal/active?timeframe=<tf>
-cada 10 segundos: GET /api/strength
-cada 15 segundos: GET /api/multi-timeframe, /api/signal/history, /api/stats
+cada 1s (Swissquote) / 2s (otras fuentes): GET /api/price
+cada 3 segundos: GET /api/binary/next-candle
+cada 3 segundos: GET /api/signal/active?timeframe=<tf>
+cada 8 segundos: GET /api/strength
+cada 10 segundos: GET /api/multi-timeframe
+cada 15 segundos: GET /api/signal/history, /api/stats
 cada 30 segundos: GET /api/sessions
 
 # === USEVOICEALERTS ===

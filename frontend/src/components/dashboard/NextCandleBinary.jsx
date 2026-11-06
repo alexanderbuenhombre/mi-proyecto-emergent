@@ -20,7 +20,7 @@ function Row({ tf, item }) {
       <div className="flex items-center gap-3">
         <span className="text-xs font-mono-num font-bold text-zinc-200">{tf}</span>
         <Icon className={`w-4 h-4 ${dirCls}`} />
-        <span className={`font-bold ${dirCls}`}>{dir}</span>
+        <span className={`font-bold ${dirCls}`} data-testid={`binary-${tf.replace(" ", "").toLowerCase()}-direction`}>{dir}</span>
       </div>
       <div className="flex items-center gap-3">
         <span className={`text-[11px] px-2 py-0.5 rounded-md font-mono-num ${conf >= 70 ? "bg-emerald-500/15 text-emerald-400" : conf >= 55 ? "bg-amber-500/15 text-amber-400" : "bg-zinc-700/40 text-zinc-300"}`}>
@@ -56,7 +56,7 @@ export default function NextCandleBinary({ data }) {
             <span className="text-emerald-400 font-bold">CALL</span> = la vela subirá ·
             <span className="text-rose-400 font-bold"> PUT</span> = la vela bajará
           </div>
-          <div className="mt-1.5">Espera confianza ≥75% para mayor probabilidad de éxito.</div>
+          <div className="mt-1.5">Solo se muestra CALL/PUT con alta probabilidad (confianza ≥75% y temporalidad superior en la misma dirección). Si ves <span className="text-zinc-200 font-bold">ESPERAR</span>, no operes.</div>
         </div>
       </div>
     </div>

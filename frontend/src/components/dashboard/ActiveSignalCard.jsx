@@ -16,6 +16,24 @@ function minutesLeft(iso) {
   return Math.max(0, Math.round(ms / 60000));
 }
 
+function WaitingHighProb({ rec }) {
+  const pct = rec?.probability_percent ?? 0;
+  const min = rec?.min_required ?? 65;
+  return (
+    <div className="text-center py-5 mb-3" data-testid="waiting-high-prob">
+      <div className="text-zinc-200 font-semibold mb-1" data-testid="waiting-high-prob-title">Esperando señal de alta probabilidad</div>
+      <div className="text-xs text-zinc-500 mb-3">Solo se emiten señales ALTA o ULTRA (≥{min}% con confluencia multi-TF)</div>
+      <div className="relative h-2 rounded-full bg-zinc-800 overflow-hidden mx-auto max-w-xs">
+        <div className="absolute inset-y-0 left-0 bg-amber-500 transition-[width] duration-700" style={{ width: `${Math.min(100, pct)}%` }} data-testid="waiting-prob-bar" />
+        <div className="absolute inset-y-0 w-0.5 bg-emerald-400" style={{ left: `${min}%` }} />
+      </div>
+      <div className="text-[11px] text-zinc-400 mt-1.5 font-mono-num" data-testid="waiting-prob-percent">
+        Actual {pct}% · Mínimo {min}%
+      </div>
+    </div>
+  );
+}
+
 export default function ActiveSignalCard({ payload, timeframe, voiceEnabled, onToggleVoice, livePrice }) {
   const signal = payload?.signal;
   // Prefer the LIVE price feed (1s/2s polling) over the signal poll price (3s)
@@ -40,10 +58,7 @@ export default function ActiveSignalCard({ payload, timeframe, voiceEnabled, onT
           </div>
         </div>
         <div className="card-body">
-          <div className="text-center py-6 mb-3">
-            <div className="text-zinc-300 font-semibold mb-1">Mercado neutral</div>
-            <div className="text-xs text-zinc-500">Esperando confirmación de tendencia para emitir señal…</div>
-          </div>
+          <WaitingHighProb rec={rec} />
           {rec && (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 space-y-2">
               <div className="flex items-center gap-2 flex-wrap">

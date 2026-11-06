@@ -14,7 +14,7 @@ export default function MultiTimeframe({ data, selected, onSelect }) {
         <div className="grid grid-cols-7 gap-1">
           {TF_LIST.map((tf) => {
             const a = tfs[tf];
-            const dir = a?.direction || "NEUTRAL";
+            const dir = a?.high_prob ? a.direction : "NEUTRAL";
             const isSel = selected === tf;
             const cls = dir === "BUY"
               ? "text-emerald-400 border-emerald-500/30"
@@ -34,6 +34,9 @@ export default function MultiTimeframe({ data, selected, onSelect }) {
                   {dir === "SELL" && <TrendingDown className="w-3.5 h-3.5" />}
                   {dir === "NEUTRAL" && <Minus className="w-3.5 h-3.5" />}
                 </div>
+                <div className="text-[8px] font-bold tracking-wider mt-0.5" data-testid={`tf-${tf}-status`}>
+                  {a?.high_prob ? a.probability : "ESPERAR"}
+                </div>
               </button>
             );
           })}
@@ -42,9 +45,9 @@ export default function MultiTimeframe({ data, selected, onSelect }) {
           Actual: <span className="text-zinc-200 font-medium">{labelFor(selected)}</span>
         </div>
         <div className="mt-3 flex items-center gap-3 text-[11px] text-zinc-500">
-          <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-emerald-400" /> Alcista</span>
-          <span className="flex items-center gap-1"><TrendingDown className="w-3 h-3 text-rose-400" /> Bajista</span>
-          <span className="flex items-center gap-1"><Minus className="w-3 h-3 text-amber-400" /> Sin señal</span>
+          <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-emerald-400" /> Alta prob. alcista</span>
+          <span className="flex items-center gap-1"><TrendingDown className="w-3 h-3 text-rose-400" /> Alta prob. bajista</span>
+          <span className="flex items-center gap-1"><Minus className="w-3 h-3 text-amber-400" /> Esperar</span>
         </div>
       </div>
     </div>

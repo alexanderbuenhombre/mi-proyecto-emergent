@@ -371,6 +371,11 @@ def compute_confluence(tv: Dict[str, Any], price: float, primary_tf: str) -> Dic
     }
 
 
+HIGH_PROB_LABELS = ("ALTA", "ULTRA")
+HIGH_PROB_MIN = 65
+BINARY_HIGH_PROB_MIN = 75
+
+
 def compute_probability(analysis: Dict[str, Any], confluence: Dict[str, Any], session_label: str) -> Dict[str, Any]:
     """Combine score, confluence, and session liquidity into probability rating.
     Returns: {label: ULTRA|ALTA|MEDIA|BAJA, percent: 0-99, take: bool, reason: str}
@@ -391,7 +396,8 @@ def compute_probability(analysis: Dict[str, Any], confluence: Dict[str, Any], se
     elif prob >= 65 and confluence["aligned_count"] >= 2:
         label, take, reason = "ALTA", True, f"{confluence['aligned_count']}/{confluence['total_count']} TFs alineados con dirección {analysis['direction']}. Recomendable tomar."
     elif prob >= 50:
-        label, take, reason = "MEDIA", False, f"Solo {confluence['aligned_count']}/{confluence['total_count']} TFs alineados. Riesgo moderado — espera mejor confirmación."
+        weak = f"Solo {confluence['aligned_count']}/{confluence['total_count']} TFs alineados" if confluence["aligned_count"] < confluence["total_count"] else f"TFs alineados pero fuerza insuficiente ({prob}% < {HIGH_PROB_MIN}%)"
+        label, take, reason = "MEDIA", False, f"{weak}. Riesgo moderado — espera mejor confirmación."
     else:
         label, take, reason = "BAJA", False, f"Indicadores débiles o contradictorios. NO recomendable operar ahora."
 
@@ -430,11 +436,14 @@ def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analy
     if not signal:
         # No active signal — but still tell user if market conditions are good for waiting an entry
         prob_label = probability["label"] if probability else "BAJA"
+        prob_pct = probability["percent"] if probability else 0
         return {
             "action": "ESPERAR",
             "label": "ESPERAR",
-            "headline": "Mercado neutral · Sin señal activa",
-            "message": "Esperando confirmación de tendencia. No operes ahora.",
+            "headline": "Sin señal activa · No operes ahora",
+            "message": f"Probabilidad actual {prob_pct}% ({prob_label}). Solo se emiten señales ALTA/ULTRA (≥{HIGH_PROB_MIN}% con confluencia). No operes ahora.",
+            "probability_percent": prob_pct,
+            "min_required": HIGH_PROB_MIN,
             "urgency": "low",
             "tone": "neutral",
             "take": False,
@@ -614,7 +623,14 @@ async def api_multi_timeframe():
     timeframes = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
     tv = await fetch_tv_analysis()
     price = STATE.get("last_price") or _get_tv(tv, "close", None, 2650)
-    results = {tf: analyze_timeframe_tv(tv, tf, price) for tf in timeframes}
+    sess_label = await _session_label()
+    results = {}
+    for tf in timeframes:
+        a = analyze_timeframe_tv(tv, tf, price)
+        confl = compute_confluence(tv, price, tf)
+        prob = compute_probability(a, confl, sess_label)
+        high = a["direction"] != "NEUTRAL" and prob["label"] in HIGH_PROB_LABELS and confl["direction"] == a["direction"]
+        results[tf] = {**a, "probability": prob["label"], "probability_percent": prob["percent"], "high_prob": high}
     return {"timeframes": results, "updated_at": datetime.now(timezone.utc).isoformat(),
             "source": "TradingView · OANDA spot"}
 
@@ -649,12 +665,8 @@ def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float,
     direction = analysis["direction"]
     if direction == "NEUTRAL":
         return None
-    # Allow signals to appear even at MEDIA probability (UI shows NO RECOMENDABLE clearly).
-    # Only suppress at BAJA where indicators are too weak/contradictory.
-    if probability["label"] == "BAJA":
-        return None
-    # Confluence direction must not directly contradict (allow NEUTRAL confluence)
-    if confluence["direction"] not in (direction, "NEUTRAL"):
+    # High-probability only: ALTA/ULTRA with confluence in the same direction
+    if probability["label"] not in HIGH_PROB_LABELS or confluence["direction"] != direction:
         return None
     a = max(analysis["atr"], 0.5)
     # Scale ATR per timeframe - higher TF = larger ATR-based stops
@@ -827,13 +839,15 @@ async def api_binary_next():
     price = STATE.get("last_price") or _get_tv(tv, "close", None, 2650)
     a1 = analyze_timeframe_tv(tv, "1m", price)
     a5 = analyze_timeframe_tv(tv, "5m", price)
+    a15 = analyze_timeframe_tv(tv, "15m", price)
 
-    def to_binary(a):
-        if a["score"] > 0:
-            return {"direction": "CALL", "confidence": min(99, max(50, abs(a["score"]) + 30))}
-        if a["score"] < 0:
-            return {"direction": "PUT", "confidence": min(99, max(50, abs(a["score"]) + 30))}
-        return {"direction": "NEUTRAL", "confidence": 50}
+    # High-probability only: strong score + higher TF agreeing in direction
+    def to_binary(a, higher):
+        conf = min(99, max(50, abs(a["score"]) + 30))
+        raw = "CALL" if a["score"] > 0 else "PUT" if a["score"] < 0 else "NEUTRAL"
+        high = raw != "NEUTRAL" and conf >= BINARY_HIGH_PROB_MIN and a["direction"] == higher["direction"] != "NEUTRAL"
+        return {"direction": raw if high else "ESPERAR", "raw_direction": raw,
+                "confidence": conf, "high_prob": high, "min_required": BINARY_HIGH_PROB_MIN}
 
     now = datetime.now(timezone.utc)
     sec_to_1m = 60 - now.second
@@ -842,8 +856,8 @@ async def api_binary_next():
         sec_to_5m += 300
 
     return {
-        "one_min": {**to_binary(a1), "seconds_left": sec_to_1m},
-        "five_min": {**to_binary(a5), "seconds_left": sec_to_5m},
+        "one_min": {**to_binary(a1, a5), "seconds_left": sec_to_1m},
+        "five_min": {**to_binary(a5, a15), "seconds_left": sec_to_5m},
     }
 
 

@@ -65,6 +65,8 @@
   - Alert types: nueva señal, TOMAR AHORA, TP alcanzado, Stop Loss, reverso, esperar (cada uno on/off).
   - Settings persisted to localStorage.
   - Auto-triggers when signal.id changes or recommendation.label changes.
+- **Filtro alta probabilidad (jun 2026)**: solo se emiten señales ALTA/ULTRA (≥65% + confluencia en misma dirección). Sin señal → "Esperando señal de alta probabilidad" con barra actual vs mínimo. Multi-TF muestra ESPERAR salvo `high_prob`. Binarias: CALL/PUT solo con confianza ≥75% y TF superior alineado, si no ESPERAR.
+
 
 ## Backlog (P1)
 - Persistir historial en MongoDB (toggle opcional para análisis histórico)
