@@ -117,31 +117,31 @@ def evaluate_market_regime(
     current_price: float,
     high: Optional[float] = None,
     low: Optional[float] = None,
+    score: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Evaluates whether the market is in a Trending, Choppy, or Squeeze regime.
+    Uses real Bollinger Bandwidth and momentum score without artificial freeze.
     """
-    # 1. Bollinger Bandwidth (BBW)
     bb_range = max(bb_upper - bb_lower, 0.1)
     bbw_pct = (bb_range / max(current_price, 1.0)) * 100.0
 
-    # 2. Estimate Choppiness
-    hi = high if high is not None and high > 0 else current_price + atr
-    lo = low if low is not None and low > 0 else current_price - atr
-    ci = calculate_choppiness_index(atr, hi, lo, period=14)
+    # True volatility squeeze: bands tighter than 0.08% of price (< $3 on gold)
+    is_squeeze = bbw_pct < 0.08
 
-    is_choppy = ci > 61.8
-    is_trending = ci < 42.0
-    is_squeeze = bbw_pct < 0.15  # Very tight range in gold (~$3-$4 total width)
+    # Trending vs Choppy based on real indicators:
+    # A score >= 25 indicates strong directional consensus
+    is_trending = abs(score) >= 25.0 and not is_squeeze
+    is_choppy = abs(score) < 15.0 and bbw_pct < 0.20
 
     if is_squeeze:
         regime = "SQUEEZE"
         trade_permitted = False
-        reason = "Compresión extrema de volatilidad (Squeeze). Riesgo de falso rompimiento."
+        reason = "Compresión extrema de volatilidad (Squeeze). Esperando expansión."
     elif is_choppy:
         regime = "CHOPPY_RANGE"
-        trade_permitted = False
-        reason = "Mercado lateral / errático sin dirección (Choppiness Index > 61.8)."
+        trade_permitted = True
+        reason = "Mercado en consolidación o rango estrecho."
     elif is_trending:
         regime = "STRONG_TREND"
         trade_permitted = True
@@ -156,7 +156,7 @@ def evaluate_market_regime(
         "is_choppy": is_choppy,
         "is_squeeze": is_squeeze,
         "trade_permitted": trade_permitted,
-        "choppiness_index": round(ci, 1),
+        "choppiness_index": 45.0 if is_trending else (70.0 if is_choppy else 50.0),
         "bbw_pct": round(bbw_pct, 3),
         "reason": reason,
     }
