@@ -13,5 +13,4 @@ export const fetchSessions = () => api.get(`/sessions`).then((r) => r.data);
 export const fetchActiveSignal = (timeframe = "5m") =>
   api.get(`/signal/active`, { params: { timeframe } }).then((r) => r.data);
 export const fetchHistory = () => api.get(`/signal/history`).then((r) => r.data);
-export const fetchBinary = () => api.get(`/binary/next-candle`).then((r) => r.data);
 export const fetchStats = () => api.get(`/stats`).then((r) => r.data);
