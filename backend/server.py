@@ -21,6 +21,21 @@ from datetime import datetime, timezone, timedelta
 import httpx
 from motor.motor_asyncio import AsyncIOMotorClient
 
+try:
+    from trading_engine import (
+        compute_continuous_score,
+        evaluate_market_regime,
+        compute_adaptive_targets,
+        evaluate_sudden_reversal,
+    )
+except ImportError:
+    from .trading_engine import (
+        compute_continuous_score,
+        evaluate_market_regime,
+        compute_adaptive_targets,
+        evaluate_sudden_reversal,
+    )
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
@@ -302,24 +317,19 @@ def analyze_timeframe_tv(tv: Dict[str, Any], timeframe: str, current_price: floa
     if bb_up != bb_lo:
         bb_pos = round((current_price - bb_lo) / (bb_up - bb_lo), 3)
 
-    # Score: weighted combination, primarily TradingView Recommend (-1..+1) -> -100..+100
-    score = int(rec_all * 100)
-    # Reinforce with extremes
-    if rsi_v < 30: score += 8
-    elif rsi_v > 70: score -= 8
-    if macd_line > macd_sig: score += 5
-    else: score -= 5
-    if cci_v > 100: score += 5
-    elif cci_v < -100: score -= 5
-    score = max(-100, min(100, score))
-
-    if score >= 25:
-        direction = "BUY"
-    elif score <= -25:
-        direction = "SELL"
-    else:
-        direction = "NEUTRAL"
-    confidence = min(99, abs(score) + 30)
+    # Continuous smooth mathematical scoring & regime classification
+    regime = evaluate_market_regime(atr_v, bb_up, bb_lo, current_price)
+    score_f, direction, confidence = compute_continuous_score(
+        recommend_all=rec_all,
+        rsi=rsi_v,
+        macd_line=macd_line,
+        macd_signal=macd_sig,
+        cci=cci_v,
+        bb_pos=bb_pos,
+        atr=atr_v,
+        current_price=current_price,
+    )
+    score = int(score_f)
 
     return {
         "direction": direction,
@@ -335,6 +345,12 @@ def analyze_timeframe_tv(tv: Dict[str, Any], timeframe: str, current_price: floa
         "close": round(current_price, 2),
         "volume_ratio": 1.0,
         "tv_recommend": round(rec_all, 3),
+        "regime": regime["regime"],
+        "is_choppy": regime["is_choppy"],
+        "is_squeeze": regime["is_squeeze"],
+        "trade_permitted": regime["trade_permitted"],
+        "choppiness_index": regime["choppiness_index"],
+        "regime_reason": regime["reason"],
     }
 
 
@@ -389,6 +405,13 @@ def compute_probability(analysis: Dict[str, Any], confluence: Dict[str, Any], se
 
     # Probability % heuristic
     prob = base_score * 0.6 + (confl_pct * 100 if confl_match else 0) * 0.3 + session_bonus
+    
+    # Mathematical filter: penalize probability under choppy/squeeze conditions
+    if analysis.get("is_choppy"):
+        prob = prob * 0.70
+    elif analysis.get("is_squeeze"):
+        prob = prob * 0.60
+
     prob = max(0, min(99, int(prob)))
 
     if prob >= 80 and confluence["aligned_count"] >= 3:
@@ -411,23 +434,9 @@ def compute_probability(analysis: Dict[str, Any], confluence: Dict[str, Any], se
 
 # ---------------- Recommendation engine ----------------
 def detect_sudden_move(direction_against: Literal["BUY", "SELL"], atr_value: float) -> Dict[str, Any]:
-    """Look at last ~30s of ticks: if move against signal > 1.0×ATR_minute, flag reversal."""
+    """Look at last ~45s of ticks: flag reversal if adverse move exceeds dynamic noise-resistant threshold."""
     ticks = list(STATE["ticks"])
-    if len(ticks) < 6:
-        return {"reversal": False, "delta": 0.0}
-    now_ts = ticks[-1][0]
-    window = [t for t in ticks if now_ts - t[0] <= 45]
-    if len(window) < 3:
-        return {"reversal": False, "delta": 0.0}
-    prices = [p for _, p in window]
-    delta = prices[-1] - prices[0]
-    # ATR is daily/multi-TF; convert to short-window threshold (~ ATR/30)
-    threshold = max(atr_value / 30.0, 0.4)
-    if direction_against == "BUY" and delta < -threshold:
-        return {"reversal": True, "delta": round(delta, 2), "threshold": round(threshold, 2)}
-    if direction_against == "SELL" and delta > threshold:
-        return {"reversal": True, "delta": round(delta, 2), "threshold": round(threshold, 2)}
-    return {"reversal": False, "delta": round(delta, 2), "threshold": round(threshold, 2)}
+    return evaluate_sudden_reversal(ticks, direction_against, eff_atr=atr_value, spread=0.25)
 
 
 def compute_recommendation(signal: Optional[Dict[str, Any]], price: float, analysis: Dict[str, Any],
@@ -665,25 +674,27 @@ def _make_signal(analysis: Dict[str, Any], timeframe: str, price_now: float,
     direction = analysis["direction"]
     if direction == "NEUTRAL":
         return None
+    # Regime filter: suppress signals during Choppy consolidation or extreme Squeeze
+    if not analysis.get("trade_permitted", True):
+        return None
     # High-probability only: ALTA/ULTRA with confluence in the same direction
     if probability["label"] not in HIGH_PROB_LABELS or confluence["direction"] != direction:
         return None
+
     a = max(analysis["atr"], 0.5)
-    # Scale ATR per timeframe - higher TF = larger ATR-based stops
-    tf_atr_scale = {"1m": 0.15, "5m": 0.25, "15m": 0.4, "30m": 0.6, "1h": 0.8, "4h": 1.0, "1d": 1.2}.get(timeframe, 0.3)
-    eff_a = a * tf_atr_scale
-    if direction == "BUY":
-        entry = price_now
-        sl = round(entry - eff_a * 1.2, 2)
-        tp1 = round(entry + eff_a * 1.0, 2)
-        tp2 = round(entry + eff_a * 2.0, 2)
-        tp3 = round(entry + eff_a * 3.5, 2)
-    else:
-        entry = price_now
-        sl = round(entry + eff_a * 1.2, 2)
-        tp1 = round(entry - eff_a * 1.0, 2)
-        tp2 = round(entry - eff_a * 2.0, 2)
-        tp3 = round(entry - eff_a * 3.5, 2)
+    # Scaled targets with positive mathematical expectation (R:R >= 1.30 on TP1)
+    targets = compute_adaptive_targets(
+        entry=price_now,
+        direction=direction,
+        timeframe=timeframe,
+        atr=a,
+        spread=0.25,
+    )
+    entry = price_now
+    sl = targets["stop_loss"]
+    tp1 = targets["tp1"]
+    tp2 = targets["tp2"]
+    tp3 = targets["tp3"]
 
     expires_minutes = {"1m": 3, "5m": 15, "15m": 45, "30m": 90, "1h": 240, "4h": 960, "1d": 1440}.get(timeframe, 15)
     now = datetime.now(timezone.utc)
