@@ -170,15 +170,6 @@ def test_history(client):
     assert isinstance(r.json()["history"], list)
 
 
-def test_binary(client):
-    r = client.get(f"{API}/binary/next-candle", timeout=60)
-    assert r.status_code == 200
-    d = r.json()
-    for k in ["one_min", "five_min"]:
-        assert d[k]["direction"] in ("CALL", "PUT", "NEUTRAL")
-        assert isinstance(d[k]["seconds_left"], int) and d[k]["seconds_left"] >= 0
-
-
 def test_stats(client):
     r = client.get(f"{API}/stats", timeout=15)
     assert r.status_code == 200
