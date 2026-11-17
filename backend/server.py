@@ -389,7 +389,6 @@ def compute_confluence(tv: Dict[str, Any], price: float, primary_tf: str) -> Dic
 
 HIGH_PROB_LABELS = ("ALTA", "ULTRA")
 HIGH_PROB_MIN = 65
-BINARY_HIGH_PROB_MIN = 75
 
 
 def compute_probability(analysis: Dict[str, Any], confluence: Dict[str, Any], session_label: str) -> Dict[str, Any]:
@@ -842,34 +841,6 @@ async def api_history():
             else:
                 s["status"] = "expired"
     return {"history": STATE["history"]}
-
-
-@api_router.get("/binary/next-candle")
-async def api_binary_next():
-    tv = await fetch_tv_analysis()
-    price = STATE.get("last_price") or _get_tv(tv, "close", None, 2650)
-    a1 = analyze_timeframe_tv(tv, "1m", price)
-    a5 = analyze_timeframe_tv(tv, "5m", price)
-    a15 = analyze_timeframe_tv(tv, "15m", price)
-
-    # High-probability only: strong score + higher TF agreeing in direction
-    def to_binary(a, higher):
-        conf = min(99, max(50, abs(a["score"]) + 30))
-        raw = "CALL" if a["score"] > 0 else "PUT" if a["score"] < 0 else "NEUTRAL"
-        high = raw != "NEUTRAL" and conf >= BINARY_HIGH_PROB_MIN and a["direction"] == higher["direction"] != "NEUTRAL"
-        return {"direction": raw if high else "ESPERAR", "raw_direction": raw,
-                "confidence": conf, "high_prob": high, "min_required": BINARY_HIGH_PROB_MIN}
-
-    now = datetime.now(timezone.utc)
-    sec_to_1m = 60 - now.second
-    sec_to_5m = (5 - (now.minute % 5)) * 60 - now.second
-    if sec_to_5m <= 0:
-        sec_to_5m += 300
-
-    return {
-        "one_min": {**to_binary(a1, a5), "seconds_left": sec_to_1m},
-        "five_min": {**to_binary(a5, a15), "seconds_left": sec_to_5m},
-    }
 
 
 @api_router.get("/stats")
