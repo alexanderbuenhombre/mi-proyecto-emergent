@@ -318,7 +318,6 @@ def analyze_timeframe_tv(tv: Dict[str, Any], timeframe: str, current_price: floa
         bb_pos = round((current_price - bb_lo) / (bb_up - bb_lo), 3)
 
     # Continuous smooth mathematical scoring & regime classification
-    regime = evaluate_market_regime(atr_v, bb_up, bb_lo, current_price)
     score_f, direction, confidence = compute_continuous_score(
         recommend_all=rec_all,
         rsi=rsi_v,
@@ -330,6 +329,7 @@ def analyze_timeframe_tv(tv: Dict[str, Any], timeframe: str, current_price: floa
         current_price=current_price,
     )
     score = int(score_f)
+    regime = evaluate_market_regime(atr_v, bb_up, bb_lo, current_price, score=score_f)
 
     return {
         "direction": direction,
@@ -402,14 +402,19 @@ def compute_probability(analysis: Dict[str, Any], confluence: Dict[str, Any], se
     # Session bonus (London/NY = +5, Asia overlap = 0)
     session_bonus = 5 if any(s in session_label for s in ["LONDRES", "NUEVA YORK"]) else 0
 
-    # Probability % heuristic
-    prob = base_score * 0.6 + (confl_pct * 100 if confl_match else 0) * 0.3 + session_bonus
-    
-    # Mathematical filter: penalize probability under choppy/squeeze conditions
-    if analysis.get("is_choppy"):
-        prob = prob * 0.70
-    elif analysis.get("is_squeeze"):
-        prob = prob * 0.60
+    # Calibrated probability model:
+    # Directional scores (|score| >= 25) with MTF confluence map naturally to ALTA/ULTRA
+    if base_score >= 25:
+        base_prob = 35.0 + (base_score * 0.55)
+        confl_ratio = confluence["aligned_count"] / max(confluence["total_count"], 1)
+        confl_bonus = (confl_ratio * 20.0) if confl_match else -10.0
+        session_bonus = 5.0 if any(s in session_label for s in ["LONDRES", "NUEVA YORK"]) else 0.0
+        prob = base_prob + confl_bonus + session_bonus
+        if analysis.get("is_squeeze"):
+            prob *= 0.50
+    else:
+        # Neutral / low momentum: naturally maps to BAJA (< 50%)
+        prob = base_score * 1.5
 
     prob = max(0, min(99, int(prob)))
 
