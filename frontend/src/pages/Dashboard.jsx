@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   fetchPrice, fetchSessions, fetchMultiTF, fetchStrength,
-  fetchActiveSignal, fetchHistory, fetchBinary, fetchStats,
+  fetchActiveSignal, fetchHistory, fetchStats,
 } from "../lib/signalsApi";
 import { usePolling } from "../lib/usePolling";
 import { loadVoiceSettings } from "../lib/voice";
@@ -13,7 +13,6 @@ import MultiTimeframe from "../components/dashboard/MultiTimeframe";
 import StrengthBars from "../components/dashboard/StrengthBars";
 import MarketSessions from "../components/dashboard/MarketSessions";
 import SignalHistory from "../components/dashboard/SignalHistory";
-import NextCandleBinary from "../components/dashboard/NextCandleBinary";
 import SystemStats from "../components/dashboard/SystemStats";
 import SourceSelector from "../components/dashboard/SourceSelector";
 import ConfluencePanel from "../components/dashboard/ConfluencePanel";
@@ -42,7 +41,6 @@ export default function Dashboard() {
   // Signal polling every 3s (was 6s) → señales aparecen con más anticipación
   const activeSig = usePolling(() => fetchActiveSignal(tf), 3000, [tf]);
   const history = usePolling(fetchHistory, 15000);
-  const binary = usePolling(fetchBinary, 3000);
   const stats = usePolling(fetchStats, 15000);
 
   const tfAnalysis = activeSig.data?.analysis || multi.data?.timeframes?.[tf];
@@ -85,7 +83,6 @@ export default function Dashboard() {
 
           {/* RIGHT */}
           <div className="lg:col-span-3 flex flex-col gap-4">
-            <NextCandleBinary data={binary.data} />
             <MultiTimeframe data={multi.data} selected={tf} onSelect={setTf} />
             <StrengthBars data={strength.data} />
             <MarketSessions data={sessions.data} />
