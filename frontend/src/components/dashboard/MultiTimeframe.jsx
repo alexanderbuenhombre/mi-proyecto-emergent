@@ -14,7 +14,8 @@ export default function MultiTimeframe({ data, selected, onSelect }) {
         <div className="grid grid-cols-7 gap-1">
           {TF_LIST.map((tf) => {
             const a = tfs[tf];
-            const dir = a?.high_prob ? a.direction : "NEUTRAL";
+            const dir = a?.direction || "NEUTRAL";
+            const isHighProb = !!a?.high_prob;
             const isSel = selected === tf;
             const cls = dir === "BUY"
               ? "text-emerald-400 border-emerald-500/30"
@@ -35,7 +36,7 @@ export default function MultiTimeframe({ data, selected, onSelect }) {
                   {dir === "NEUTRAL" && <Minus className="w-3.5 h-3.5" />}
                 </div>
                 <div className="text-[8px] font-bold tracking-wider mt-0.5" data-testid={`tf-${tf}-status`}>
-                  {a?.high_prob ? a.probability : "ESPERAR"}
+                  {isHighProb ? a.probability : (dir === "NEUTRAL" ? "ESPERAR" : dir)}
                 </div>
               </button>
             );
