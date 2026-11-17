@@ -862,6 +862,11 @@ async def api_stats():
 
 # Include router & CORS
 app.include_router(api_router)
+
+@app.get("/")
+async def root_health():
+    return {"service": "XAUUSD Signals API", "status": "online", "ok": True}
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
